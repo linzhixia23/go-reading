@@ -1007,3 +1007,410 @@ delete(timeZone, "PDT")  // Now on Standard Time
 ```
 
 ##### printing 
+Go的格式化输出跟C的printf相似，但其更加丰富而通用。
+这些函数都在fmt包里，都是以大写字母开头：fmt.Printf, fmt.Fprintf和fmt.Sprintf等。
+字符串函数（如Sprintf）会返回一个string，而不是填充给定的缓冲区。
+
+你不是需要提供一个格式化的字符串。对每一个函数，如Printf、Fprintf、Sprintf都分别对应另外一个函数，如Print和Println。
+这些函数不接受格式化的字符串，而是对每一个实参生成默认的格式。
+Println函数会在实参之间插入空格，并在输出时追加换行符；而Print只会在操作数两侧都没有字符串时才加入空白。
+这下面示例中，每一行都是相同的输出。
+
+```go
+fmt.Printf("Hello %d\n", 23)
+fmt.Fprint(os.Stdout, "Hello ", 23, "\n")
+fmt.Println("Hello", 23)
+fmt.Println(fmt.Sprint("Hello ", 23))
+```
+
+fmt.Fprint一类格式化的打印函数，可以接受任何实现了io.Writer接口的对象做为第一个实参。；
+os.Stdout和os.Stderr都是我们熟知的函数。
+
+从这里开始，就跟C有不同了。首先，数字格式，例如%d，不需要符号标识或者大小；输出的例程会根据实参的类型对你决定。
+
+```go
+var x uint64 = 1<<64 - 1
+fmt.Printf("%d %x; %d %x\n", x, x, int64(x), int64(x))
+```
+
+打印 
+
+```
+18446744073709551615 ffffffffffffffff; -1 -1
+```
+
+如果你需要默认的转化，如十进制的整数，你可以用%v来包含所有的格式；其结果与Print和Println输出的完全相同。
+而且，它还可以打印任何值，包括array、struct和map。以下是打印前一节定义的map类型：
+
+```go
+fmt.Printf("%v\n", timeZone)  // or just fmt.Println(timeZone)
+```
+
+它会输出：
+```
+map[CST:-21600 EST:-18000 MST:-25200 PST:-28800 UTC:0]
+```
+
+对于Map，Printf一类的函数，会把它的key按照字典排序输出。
+
+当打印一个struct时，%+v会为struct的每个filed加上字段名，而%#v则会完全按照go的语法输出。
+
+```go
+type T struct {
+    a int
+    b float64
+    c string
+}
+t := &T{ 7, -2.35, "abc\tdef" }
+fmt.Printf("%v\n", t)
+fmt.Printf("%+v\n", t)
+fmt.Printf("%#v\n", t)
+fmt.Printf("%#v\n", timeZone)
+```
+
+则会打印
+```go
+&{7 -2.35 abc   def}
+&{a:7 b:-2.35 c:abc     def}
+&main.T{a:7, b:-2.35, c:"abc\tdef"}
+map[string]int{"CST":-21600, "EST":-18000, "MST":-25200, "PST":-28800, "UTC":0}
+```
+
+(注意&符号)。当遇到string或者[]byte时，用%q打印带引号的字符串；而%#q会尽可能使用反引号。
+此外，%x还可用于string、[]byte以及整数，并生成一个很长的十六进制字符串， 而带空格的格式（% x）还会在字节之间插入空格。
+
+另外一个常用的格式是 %T，它会打印值的类型。
+
+```go
+fmt.Printf("%T\n", timeZone)
+``` 
+ 
+会打印
+
+```go
+map[string]int
+```
+
+如果你希望控制一个定制类型的默认输出，只需要为该类型定义 String() string 的方法。
+对于一个简单的类型T，它可能看起来是这样的：
+
+```
+func (t *T) String() string {
+    return fmt.Sprintf("%d/%g/%q", t.a, t.b, t.c)
+}
+fmt.Printf("%v\n", t)
+```
+
+它会打印如下格式：
+
+```go
+7/-2.35/"abc\tdef"
+```
+ 
+如果你需要像指向T的指针那样打印类型T，那么String的receiver就必须是值类型的；
+这个例子用指针是因为它更有效，而且符合struct的惯例。
+下面的章节（pointer vs value receiver）会展示更多细节。
+
+我们的String方法也可以调用Sprintf，因为我们的print例程是fully reentrant的，而且可以按照这种方式封装。
+要理解这种方式，还有一个重要的细节：请不要通过Sprintf来构造String，因为它会无限地调用你的String方法。
+当Sprintf尝试把receiver当作string来打印，它会反过来又调用Sprintf。
+这是一个常见的错误，正如以下的例子：
+
+```go
+type MyString string
+
+func (m MyString) String() string {
+    return fmt.Sprintf("MyString=%s", m) // Error: will recur forever.
+}
+```
+
+这个问题很容易解决，把实参转化成基本的string类型，这就没有了这个方法。
+
+```go
+type MyString string
+func (m MyString) String() string {
+    return fmt.Sprintf("MyString=%s", string(m)) // OK: note conversion.
+}
+```
+ 
+在initialization节，我们会看到另一个方法去避免这样的循环调用。 
+
+另一个关于打印的技术，是把一个打印例程的实参传入另外一个例程。
+Printf的最后一个实参用了...interface{}来定义，这样它可以使用任意数量、任意格式的参数。
+
+```go
+func Printf(format string, v ...interface{}) (n int, err error) {
+```
+
+在函数Printf中，v像是[]interface{}类型的变量，但如果把它传到一个变参函数中，它就是一个实参列表了。
+以下是我们之前用过的函数log.Println的实现。它直接把实参传给fmt.Sprintln来进行实际的格式化。
+
+```go
+// Println prints to the standard logger in the manner of fmt.Println.
+func Println(v ...interface{}) {
+    std.Output(2, fmt.Sprintln(v...))  // Output takes parameters (int, string)
+}
+```
+
+在Sprintln的内嵌调中，我们把...写在v的后面，来告诉编译器，把v当作一个实参列表；否则，它会把v当作单slice的实参。
+
+还有很多关于打印的知识点，可以从godoc文档的fmt包查找更多的细节。
+
+另外，... 参数可以指定特定的类型，例如，可以用 ...int 来定义min函数的入参，表示从整型的列表里找最小的数字。
+
+```go
+func Min(a ...int) int {
+    min := int(^uint(0) >> 1)  // largest int
+    for _, i := range a {
+        if i < min {
+            min = i
+        }
+    }
+    return min
+}
+```
+
+##### append 
+
+现在我们需要解释内建函数append的设计。append函数的signature不同于我们之前定义的函数Append。
+简单来说，它像这样的：
+
+```go
+func append(slice []T, elements ...T) []T
+```
+
+这里的T是任何类型的占位符。事实上，在Go里没办法写一个类型T由调用者决定的函数。
+这也就是为什么append是内建函数，因为它需要编译器的支持。
+
+append函数的作用是，把元素放在slice的后面，并返回结果。
+结果必须要返回，正如我们实现的Append函数一样，内部的array可能会改变。
+
+以下简单的示例：
+
+```go
+x := []int{1,2,3}
+x = append(x, 4, 5, 6)
+fmt.Println(x)
+```
+ 
+它输出的是\[1 2 3 4 5 6\]。 因此， append像Printf，可以接受任何数量的实参。
+
+但是，如果我们想把一个slice添加到另一个slice后面呢。在调用的地方使用 ...，就像我们上面调用Output一样。
+以下代码输出的结果跟上面的一样。
+
+```go
+x := []int{1,2,3}
+y := []int{4,5,6}
+x = append(x, y...)
+fmt.Println(x)
+```
+
+如果没有 ..., 它会编译不过，因为类型错误；y不是int类型。
+
+### 九、初始化
+
+尽管表面看起来，Go的初始化与C/C++并没有太大区别，但Go功能更加强大。
+在初始化时，可以构造复杂的结果，而且它很好地解决了不同包的不同对象之间的初始化顺序的问题。
+
+##### 常量
+Go里面的常量是不变量。它们在编译的时候创建，即便它们可能是函数中定义的局部变量；它们只能是数字，字符（包括rune），字符串和布尔变量。
+由于编译器的限制，它们的表达式必须是常量的表达式，能够被编译器求值计算。
+例如，1<<3是一个常量表达式，而 math.Sin(math.Pi/4)则不是，因为它需要调用math.Sin 函数，而这只会在运行时才会发生。
+
+在Go中，枚举类型可以用枚举器iota创建。
+由于iota可以是表达式的一部分，而表达式可以被隐式地重复，这就可以更容易地创建复杂的值的集合。
+
+```go
+type ByteSize float64
+
+const (
+    _           = iota // ignore first value by assigning to blank identifier
+    KB ByteSize = 1 << (10 * iota)
+    MB
+    GB
+    TB
+    PB
+    EB
+    ZB
+    YB
+)
+```
+
+由于可以将类似String这样的方法附加到任何用户定义的类型上，这就使得任何值都能提供自动化的打印的格式。 
+尽管你看到的大多数例子都是struct类型，但它们同样可以用于类似浮点类型的标量类型，例如ByteSize。
+
+```go
+func (b ByteSize) String() string {
+    switch {
+    case b >= YB:
+        return fmt.Sprintf("%.2fYB", b/YB)
+    case b >= ZB:
+        return fmt.Sprintf("%.2fZB", b/ZB)
+    case b >= EB:
+        return fmt.Sprintf("%.2fEB", b/EB)
+    case b >= PB:
+        return fmt.Sprintf("%.2fPB", b/PB)
+    case b >= TB:
+        return fmt.Sprintf("%.2fTB", b/TB)
+    case b >= GB:
+        return fmt.Sprintf("%.2fGB", b/GB)
+    case b >= MB:
+        return fmt.Sprintf("%.2fMB", b/MB)
+    case b >= KB:
+        return fmt.Sprintf("%.2fKB", b/KB)
+    }
+    return fmt.Sprintf("%.2fB", b)
+}
+```
+
+表达式YB会打印成1.0YB,而ByteSize(1e13)会打印成9.09TB。
+在这里用Sprintf去实现ByteSize的String方法很安全（避免了循环调用），这倒不是因为类型转换，而是因为它是用%f来调用Sprintf。
+这不是string格式——Sprintf只会在它需要string的时候，才调用String方法；而%f则是需要一个浮点数值。
+
+##### 变量
+变量可以像常量一样被初始化，但其initializer可以是一个运行时才被计算的通用表达式。
+
+```go
+var (
+    home   = os.Getenv("HOME")
+    user   = os.Getenv("USER")
+    gopath = os.Getenv("GOPATH")
+)
+```
+
+##### 初始化函数 
+最后，任何源文件都可以定义自己的无参数init函数来设置必要的状态。
+实际上，每个文件都可以定义多个init函数。
+init在所有定义在包里声明的变量通过它们的initializer求值之后才被调用；
+而那些声明的变量是在所有导入的包被初始化之后才会计算。
+（个人理解，就是：所有导入的包初始化->所有包声明的变量初始化->init函数调用）
+
+除了不能通过声明来表示的初始化，init函数常用于在函数真正执行之前，检验或修正程序的状态。
+
+```go
+func init() {
+    if user == "" {
+        log.Fatal("$USER not set")
+    }
+    if home == "" {
+        home = "/home/" + user
+    }
+    if gopath == "" {
+        gopath = home + "/go"
+    }
+    // gopath may be overridden by --gopath flag on command line.
+    flag.StringVar(&gopath, "gopath", gopath, "override default GOPATH")
+}
+```
+
+### 十、方法 
+
+##### Pointers vs. Values 
+
+正如我们看到的ByteSize一样，我们可以为任何命名的类型（除了指针和接口）定义方法；receiver不要求一定是struct。
+
+我们之前对slice讨论时，写了一个Append函数。我可以可以把它定义为slice的方法。
+要做到这点，我们首先定义了一个命名的类型，这样我们就可以绑定方法；然后使得该方法的receiver成为该值的类型。
+
+```go
+type ByteSlice []byte
+
+func (slice ByteSlice) Append(data []byte) []byte {
+    // Body exactly the same as the Append function defined above.
+}
+```
+
+这仍然要求方法返回更新后的slice。
+为了消除这种不便，我们可以重新定义这个方法，通过一个指向ByteSlice的指针做为它的receiver，这样这个方法可以重写调用者提供的slice。
+
+```go
+func (p *ByteSlice) Append(data []byte) {
+    slice := *p
+    // Body as above, without the return.
+    *p = slice
+}
+```
+
+实际上，我们可以做的更好。我们可以修改我们的函数，使其看起来像一个标准的Write方法，就像这样：
+
+```go
+func (p *ByteSlice) Write(data []byte) (n int, err error) {
+    slice := *p
+    // Again as above.
+    *p = slice
+    return len(data), nil
+}
+```
+
+这样，*ByteSlice满足标准的接口io.Writer，这样就很方便了。我们可以打印到该类型的变量中，
+
+```go
+ 	var b ByteSlice
+    fmt.Fprintf(&b, "This hour has %d days\n", 7)
+```
+
+我们传递的是ByteSlice的地址，因为只有 *ByteSlice 才满足 io.Writer。
+以指针或者值做为receiver的区别在于，值的方法可以通过指针和值调用，而指针的方法只能通过指针调用。
+
+之所以有这条规则是因为，指针方法可以修改receiver；对它们进行值调用，会导致方法收到一个值的copy，这样任何的修改都会失效。
+因而，从语法上禁止了这个错误。不过，这有一个好用的例外，如果值是可以寻址的，那么，语法会自动插入寻址符来处理一般的通过值调用的指针方法。
+在我们这个例子中，由于变量b是可以寻址的，因此我们可以通过b.Write来使用它的Write方法。
+编译器会帮我们重写成(&b).Write。
+
+顺便说一下，在字节slice上使用Write是 bytes.Buffer 实现的核心。 
+
+### 十一、接口与其他类型
+
+##### 接口 
+
+Go的接口提供了一个方式去明确一个对象的行为：如果一样东西可以做这个，那么它就可以在这里使用（if something can do this, then it can be used here）。
+我们已经看到了一些简单的例子；定制化的printer可以用一个String方法实现，而Fprintf可以为任何实现了Write方法的对象产生输出。
+在go代码中，仅包含1、2个方法的接口很常见，其名称来源于这个方法，例如实现Write的 io.Writer 。
+
+一个类型可以实现多个接口。
+例如，一个实现了sort.Interface的集合可以通过sort包的例程进行排序。
+该接口sort.Interface包含了Len(), Less(i, j int) bool, 和 Swap(i, j int)，并且有一个可定制化的formatter。
+以下构建的例子Sequence满足了这两种情况：
+
+```go
+type Sequence []int
+
+// Methods required by sort.Interface.
+func (s Sequence) Len() int {
+    return len(s)
+}
+func (s Sequence) Less(i, j int) bool {
+    return s[i] < s[j]
+}
+func (s Sequence) Swap(i, j int) {
+    s[i], s[j] = s[j], s[i]
+}
+
+// Copy returns a copy of the Sequence.
+func (s Sequence) Copy() Sequence {
+    copy := make(Sequence, 0, len(s))
+    return append(copy, s...)
+}
+
+// Method for printing - sorts the elements before printing.
+func (s Sequence) String() string {
+    s = s.Copy() // Make a copy; don't overwrite argument.
+    sort.Sort(s)
+    str := "["
+    for i, elem := range s { // Loop is O(N²); will fix that in next example.
+        if i > 0 {
+            str += " "
+        }
+        str += fmt.Sprint(elem)
+    }
+    return str + "]"
+}
+```
+
+##### 类型转换
+
+Sequence的String方法重新实现了Sprint为Slice实现的功能。而且它的复杂度是 ![](http://latex.codecogs.com/gif.latex?\\O(N^2)) ,
+$O(N^2)$ ， 这个性能是很差的。 
+
+
+
