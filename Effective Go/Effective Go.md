@@ -465,7 +465,7 @@ Loop:
 
 当然，continue也能使用一个optional的标签，但它只能在循环中使用。
 
-做为本节的结束，来看一段代码，它使用switch对两个slce做对比。
+做为本节的结束，来看一段代码，它使用switch对两个slice做对比。
 ```go
 // Compare returns an integer comparing the two byte slices,
 // lexicographically.
@@ -1408,13 +1408,6 @@ func (s Sequence) String() string {
 ```
 
 ##### 类型转换
-
-
-插入公式编辑测试：
-
-<script type="text/javascript" src="http://cdn.mathjax.org/mathjax/latest/MathJax.js?config=default"></script>
-$$x=\frac{-b\pm\sqrt{b^2-4ac}}{2a}$$
-
 
 Sequence的String方法重新实现了Sprint为slice实现的功能。而且它的复杂度是 ![](http://latex.codecogs.com/gif.latex?\\O(N^2)) ，这个性能是很差的。 
 如果我们在调用Sprint之前把Sequence转化成纯粹的[]int，我们就可以分享slice做的工作。
