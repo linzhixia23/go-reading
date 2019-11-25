@@ -291,3 +291,7 @@ To replication! The cause of, and solution to all of life's problems.
 计算速度慢？数据副本可以支持在多个系统上进行计算。
 I/O速度慢？把数据复制到本地cache，可以减少延迟，或者利用多个机器来增加吞吐量。
 
+
+
+
+(测试)
