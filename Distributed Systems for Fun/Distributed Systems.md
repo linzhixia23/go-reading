@@ -73,7 +73,7 @@
 例如，我不会讨论特定的问题，像原子网络的配置，或者共享内存设置。
 我们关注于探索系统设计的空间，而不是优化特定的设计--后者应该是更加专业的书籍的主题。
 
-##### 我们期望的是：可扩展性以及其他的好处
+#### 我们期望的是：可扩展性以及其他的好处
 
 我的看法是，任何问题都开始于处理大小（原话是，The way I see it, everything starts with the need to deal with size）。
 
@@ -98,7 +98,7 @@ Scalability is the ability of a system, network, or process, to handle a growing
 一个扩展性的系统就是能够随着规模的扩大而不断满足用户的需求。
 有两个关键的指标：性能和可用性，它们可以用很多方式来评价。
 
-##### 性能&&延迟 
+#### 性能&&延迟 
 
 性能的定义：
 
@@ -143,7 +143,7 @@ result = query(all data in the system)
 
 这个最小延时对你的影响取决于查询的问题本质，以及信息传输的实际物理距离。
 
-##### 可用性&&容错性
+#### 可用性&&容错性
 
 可扩展系统的另一个考量是可用性。
 
@@ -181,7 +181,7 @@ Fault tolerance：ability of a system to behave in a well-defined manner once fa
 可容错性可以归结为：定义你认为会出现的错误，并设计系统或者算法去容忍它们。
 你不可能对毫无预期的错误做容错。
 
-##### 哪些因素会阻止我们得到好的结果？
+#### 哪些因素会阻止我们得到好的结果？
 
 分布式系统会受到两个物理因素的限制：
 
@@ -212,7 +212,7 @@ After all, it is a hardware limitation in people that we have a hard time unders
 That's the difference between an error and an anomaly - an error is incorrect behavior, while an anomaly is unexpected behavior. 
 If you were smarter, you'd expect the anomalies to occur.
 
-##### 抽象和建模 
+#### 抽象和建模 
 
 这就是抽象和建模在一起工作的方式：抽象通过把现实世界中与解决问题无关的部分剥离出来，使得问题更容易管理；建模用准确的方式描述分布式系统的关键属性。
 我会在下一节讨论很多种模型，例如：
@@ -239,7 +239,7 @@ If you were smarter, you'd expect the anomalies to occur.
 我下一节要讲的CAP理论，涉及了上述的一些问题。
 最后要说的是，理想的系统要同时满足程序员的需求（清晰的语法）以及商业要求（可用性、一致性、延迟性）。
 
-##### 设计技术：数据分片和副本
+#### 设计技术：数据分片和副本
 
 数据集以什么样的方式分布式放在不同节点这个问题很重要。
 为了应付任何类型的计算，我们需要放置数据，并应用它。
@@ -253,7 +253,41 @@ If you were smarter, you'd expect the anomalies to occur.
 
 ![image](https://github.com/linzhixia23/go-reading/blob/master/Distributed%20Systems%20for%20Fun/pic/1_partition_and_replicate.png)
 
+这种one-two punch的方式可以解决任何分布式计算的问题。
+当然，其中的trick是你要选择合适的技术用于你具体的实现；有很多算法可实现分片和副本，每个都有不同的限制和优势，你要能根据你的设计目标做出抉择。
 
+#### 数据分片 
 
+数据分片是把数据集分成相互独立的小的集合；它用于减少数据增长带来的影响，因为每一个分片都是数据的子集。
 
+* 数据分片可以提高性能，通过限制要运算的数据规模，以及把相关的数据放在同样的分区。
+
+* 数据分片可以提高可用性，它可以使得个别节点失败而不影响其他节点，以增加系统可以允许节点失败的个数。
+
+数据分片是跟实际应用场景非常相关，所以没有具体的应用，很难明确说明要把数据分成多少份。
+这也就是为什么大多数的教材把笔墨放在数据副本上，当然我们也一样。
+
+数据分片主要是基于你的系统主要访问的模式来分片，并处理由不同分片导致的限制。
+例如，跨分片访问的效率问题、不同分片增长速度不同的问题。
+
+#### 数据副本（Replication）
+
+数据副本是指在不同机器拷贝相同的数据；这样可以让更多的服务器参与计算。
+
+这里引用 Homer J.Simpson的原话：
+
+To replication! The cause of, and solution to all of life's problems.
+
+数据副本是我们应对延迟（latency）的主要方式。
+
+* 数据副本可以提高性能，因为复制数据可以使用到更多计算资源（computing power）和带宽。
+
+* 数据副本可以提高可用性，它创建数据的拷贝，以增加系统可以允许节点失败的个数。
+
+数据副本主要关于提供了额外的带宽和缓存，以及对一些一致性模型用一些方式来保持一致性。
+
+数据副本让我们实现可扩展性、性能和容错。
+担心失去可用性和降低性能？数据副本可以让我们避免单点失败以及瓶颈。
+计算速度慢？数据副本可以支持在多个系统上进行计算。
+I/O速度慢？把数据复制到本地cache，可以减少延迟，或者利用多个机器来增加吞吐量。
 
