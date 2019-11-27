@@ -291,7 +291,47 @@ To replication! The cause of, and solution to all of life's problems.
 计算速度慢？数据副本可以支持在多个系统上进行计算。
 I/O速度慢？把数据复制到本地cache，可以减少延迟，或者利用多个机器来增加吞吐量。
 
+数据副本会引起很多问题，因为不同机器上的相互独立的数据之间要通信同步数据，这就意味着要遵守一个一致性模型。
+
+一致性模型的选择至关重要：好的模型更容易理解它为什么能保证一致性，而且能达到商业和设计上的目标，例如高可用性、强一致性等。
+
+强一致性模型是唯一能够让你在写代码时，可以认为底层数据是没有副本的。
+其他的一致性模型，或多或少都把内部的副本的原理暴露给开发者。
+不过，弱一致性模型可以提高更低的延时和高可用性，而且容易理解。
+
+#### 延伸阅读
+
+* [The Datacenter as a Computer - An Introduction to the Design of Warehouse-Scale Machines - Barroso & Hölzle, 2008](https://www.morganclaypool.com/doi/pdf/10.2200/s00193ed1v01y200905cac006)
+
+* [https://en.wikipedia.org/wiki/Fallacies_of_distributed_computing](https://en.wikipedia.org/wiki/Fallacies_of_distributed_computing)
+
+* [Notes on Distributed Systems for Young Bloods - Hodges, 2013](https://www.somethingsimilar.com/2013/01/14/notes-on-distributed-systems-for-young-bloods/)
 
 
+### 2、向上和向下抽象（Up and down the level of abstraction）
 
-(测试)
+在这一节，我们要探索向上和向下的抽象，审视一些理想的模型（CAP和FLP），然后考虑如何在性能上做折中。
+
+如果你熟悉任何编程语言，那么抽象的层次对你来说可能很熟悉。
+你可能在一些抽象层级上工作，通过API与低的层级交互，可能提供一些高层级的API或者用户接口。
+网络的7个层级就是一个很好的例子。
+
+我说过了，分布式编程就是大多数时间在处理分布式带来的后果。
+我们的现实是，分布式系统有很多个相互作用的节点，而我们的愿望是让它们"像一个系统一样工作"，这两者之间有一定鸿沟。
+也就是说，我们要在它能够做成什么样，以及它的理解性和性能之间取得平衡。
+
+当我们说X比Y更加抽象时，是什么意思呢？
+首先，X在本质上与Y没有不同。事实上是，X移除了Y的一些特点，或者用另一种方式来展示，使得它更加容易管理。
+其次，在一定程度上，X比Y更容易理解，当然，这里的假设前提是，X从Y移除的一些特性无关重要。
+
+正如 Nietzsche 写的：
+
+Every concept originates through our equating what is unequal. 
+No leaf ever wholly equals another, and the concept "leaf" is formed through an arbitrary abstraction from these individual differences, through forgetting the distinctions;
+and now it gives rise to the idea that in nature there might be something besides the leaves which would be "leaf" - some kind of original form after which all leaves have been woven, marked, copied, colored, curled, and painted,
+but by unskilled hands, so that no copy turned out to be a correct, reliable, and faithful image of the original form.
+
+抽象本质上就是假的。每一个环境都是独特的，正如每一个节点。
+但是抽象让世界更容易管理：简化问题，使得更容易分析，而且没有忽略任何关键的东西，而结果广泛适用。
+
+
