@@ -433,10 +433,115 @@ Node执行确定性的算法：本地计算、本地计算之后的状态、以�
 
 #### 时间/顺序的假设
 
+物理上分离的一个结果是，每一个节点都以各自的方式进行工作。这是不可避免的，因为信息最多只能以光速传递。
+如果节点之间的距离都各自不同，那么从一个节点出发的信息，会在不同的时间到达其他节点，而且顺序也可能不同。
+
+时间的假设（timing assumption）是现实中很容易考虑到的问题。（原文是：Timing assumptions are a convenient shorthand for capturing assumptions about the extent to which we take this reality into account）
+两个主要的选择是：
+
+* 同步系统模型：进程以lock-step方式处理；它们有一个已知的信息传输的最大时延；每一个进程都有一个准确的时钟。
+
+* 异步系统模型：没有时间的假设；每一个进程以相互独立的速率运行；它们对信息传播时延没有限制；没有时钟。
+
+同步系统模型对时间和顺序强加了很多限制。
+它们本质上假设节点的情况相同：发送的信息总是在特定的最大传输时延里收到，以lock-step方式处理。
+这样处理比较方便，因为它允许系统设计者对时间和顺序做出假设，而异步的系统模型则做不到。
+
+异步性不是一个假设：它只是假设你不能太依赖时机。（原话是：Asynchronicity is a non-assumption: it just assumes that you can't rely on timing ）
+
+用同步系统模型更容易解决问题，它对执行速度、最大消息传输时延以及时钟的准确性等做了假设，这有助于你解决问题，因为你可以基于这些假设进行操作，也可以假设一些失败的场景永远不会发生。
+
+当然，一些同步系统模型的假设并不是特别现实。
+现实世界的网络总是有失败的，而且对消息延时并没有严格的界限。
+现实世界的系统最好是部分同步：它们可能有时准确工作，并有一些上界，但有时消息会永久延迟，时钟同步也会失效。
+我不会讨论同步系统的算法，但你可能会在一些介绍性的书籍遇到它们，因为它们更容易进行分析（但在实际系统中并不现实）。
+
+#### 一致性问题
+
+这篇文档的剩余部分，我们会改变系统模型的不同参数。
+下面，我们来看看改变两个系统属性如何会影响系统设计：
+
+* 是否网络分离包含在错误模型（failure model）中
+
+* 同步vs异步的时间假设
+
+我们会讨论两个不可达结果（impossibility result）。
+
+当然，为了更好地展开讨论，我们需要引入要解决的问题。这个问题就是[一致性问题](https://en.wikipedia.org/wiki/Consensus_%28computer_science%29)。
+
+几个计算机（或者节点）如果同意某个值，就说明它们达成一致。更准确地说：
+
+* 同意（agreement）：每一个正确的进程必须同意相同的值；
+
+* 诚实（integrity）：每一个正确的进程的决定做多只有一个值，如果它要决定某个值，则这个值之前必须由其他进程提议
+
+* 结束（termination）：所有进程最终做出一个决定
+
+* 有效性（validity）：如果所有正确的进行提议同样的值V，则所有正确的进行决定V。
+
+一致性问题是很多商业分布式系统的核心。毕竟，我们希望利用分布式系统的可靠性和性能，但又不希望去处理因分布式带来的结果（如：节点不一致等），
+因此解决一致性问题有助于解决一些相关的、更加高阶的问题，例如原子广播和原子提交。
+
+#### 两个不可达结果（impossibility result）
+
+第一个不可达结果是FLP，它跟分布式算法设计相关；第二个是CAP理论，它跟分布式的实践者相关--给那些需要选择不同的系统设计，但又不需要关系算法设计的人。
+
+#### FLP不可达结果
+
+我只会简单地总结FLP不可达结果，尽管它在学术圈非常重要。
+FLP通过异步系统模型来检查一致性问题。
+它假设唯一失败的方式是crash、网络是可靠的、消息的延迟没有界限（bound）——这个也是异步系统模型的典型时间假设。
+
+基于这些假设，FLP认为"在异步系统中，不存在一个决定的（deterministic）算法适用于一致性问题，因为受到失败限制，即便消息不会丢失、最多只有一个进程失败、进程只会因为crash而失败"。
+
+（译者注：由Fischer、Lynch和Patterson三位科学家于1985年发表的论文《Impossibility of Distributed Consensus with One Faulty Process》指出：
+在网络可靠，但允许节点失效--即便只有一个的最小化异步模型系统中，不存在一个可以解决一致性问题的确定性共识算法。
+原话是，No completely asynchronous consensus protocol can tolerate even a single unannounced process death）
+
+这个结果意味着，即便是在一个最小的、消息不会延迟的系统模型中，也不可能解决一致性问题。
+它的论述是这样的，如果这个共识算法存在，那么就可以设计出这样的执行机制：它会延迟消息传递--异步系统模型允许这样，于是会导致在一段时间内状态是不确定的。
+因此，这个算法是不存在的。
+（原话是，The argument is that if such an algorithm existed, 
+then one could devise an execution of that algorithm in which it would remain undecided ("bivalent") for an arbitrary amount of time by delaying message delivery - which is allowed in the asynchronous system model. Thus, such an algorithm cannot exist.）
 
 
+这个不可达结果是重要的，因为它强调了异步系统模型的折中：当不保证信息传递的上下界时，共识性算法必须放弃安全性或者活跃性（liveness）。
+（原话是，algorithms that solve the consensus problem must either give up safety or liveness when the guarantees regarding bounds on message delivery do not hold）
+
+这个洞察对算法设计者尤其重要，因为它给可以用异步系统模型解决的问题加了一个严格的限制。
+CAP理论则跟实践者更加相关：它基于的假设稍微不同（网络失败而不是节点失败），而且更方便实践者在系统设计中做出选择。
+
+#### CAP理论
+
+CAP理论最早是计算机科学家Eric Brewer做的一个假设。它是一个常见的、且相对公平的方式来思考系统设计时做的保证。
+
+这个理论表示以下三个属性，只能同时满足两个：
+
+* 一致性：所有节点在相同时间看到的数据是一样的
+
+* 可用性：失败的节点不会影响其他节点的工作
+
+* 分区容错性：系统在网络失败导致消息丢失的情况下，仍然能够继续工作
+
+我们可以画一个图来展示满足任意两个条件的系统：
+
+![image](https://github.com/linzhixia23/go-reading/blob/master/Distributed%20Systems%20for%20Fun/pic/2_CAP_intersection.png)
+
+注意到，中间的部分（也就是满足三个条件的部分）是不可达到的。
+这样，我们得到三个不同的系统类型：
+
+* CA（一致性+可用性）：例子是完整的严格仲裁协议（full strict quorum protocols），如：2PC（two-phase commit）
+
+* CP（一致性+分区容错性）： 例子是多数仲裁协议（majority quorum protocol），即少量的分区不可用，如 paxos
+
+* AP（可用性+分区容错性）：例子是使用冲突决议（conflict resolution）的协议，如 Dynamo
+
+CA和CP提供了相同的一致性模型：强一致性。
+唯一的区别是，CA系统不能允许任何节点失败；而CP系统可以允许一个有2f+1个节点的非拜占庭失败模型（ non-Byzantine failure model）里，最多f个节点失败。
+理由很简单：
 
 
+ 
 
 
 
