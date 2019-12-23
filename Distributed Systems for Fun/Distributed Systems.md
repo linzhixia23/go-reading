@@ -540,6 +540,116 @@ CA和CP提供了相同的一致性模型：强一致性。
 唯一的区别是，CA系统不能允许任何节点失败；而CP系统可以允许一个有2f+1个节点的非拜占庭失败模型（ non-Byzantine failure model）里，最多f个节点失败。
 理由很简单：
 
+* CA系统并没有区分节点失败和网络失败，因此必须停止接受写入，以避免引入分歧。
+它无法确认是远端节点挂了，还是网络连接失败：因此最稳妥的方式就是不给写入。
+
+* CP系统防止分歧的方式是在分区的两边都强制不对称的行为。
+它只维护大多数的分区，而让少数的分区不可用，这样在一定程度上保持可用性，而且保证单点复制（single-copy）的一致性。
+
+我会在讨论paxos的章节阐释更多细节。CP系统的要点是，它们把网络分区融合到失败模型（failure model）中，使用像Paxos，Raft这样的算法来区分大多数分区和少数分区（ a majority partition and a minority partition）。
+CA系统对分区并不敏感，而且更加常见：它们经常用2PC算法，而且在传统的分布式关系数据库中很常见。
+
+如果分区是必须存在的，那么CAP理论其实就是在可用性和一致性中做出选择。
+
+![image](https://github.com/linzhixia23/go-reading/blob/master/Distributed%20Systems%20for%20Fun/pic/2_CAP_choice.png)
+
+我认为从CAP理论应该能推导出4个结论：
+
+第一，许多早期的分布式关系数据库的系统设计并没有考虑到分区容错性（它们是CA设计）。
+分区容错性是现代系统很重要的一个属性，因为在系统是物理隔壁的情况下，网络隔离（network partition）的可能性变高了。
+
+第二，在网络隔离（network partition）的情况下，强一致性和高可用之间存在鸿沟。
+CAP理论是对强一致保证（strong guarantees）和分布式计算之间的折中的阐释。
+
+在某种意义上，想保证一个由不可靠的网络连接起来的相互独立的节点像一个非分布式系统一样工作，是一件很疯狂的事。
+
+在分区的情况下，强一致性保证要求我们放弃可用性。
+这是因为，在两个副本不能通信的情况而又分别在持续接收写请求的情况下，不能保证不会出现分歧。
+
+那我们应该怎么解决呢？使用更强的假设（假设没有分区），或者减弱一致性的保证。
+一致性可以跟可用性做折中。如果一致性的要求比"所有节点在相同时间看到的数据都一样"要弱，那么我们就能保证可用性和弱一致性。
+
+第三，在常规操作中，强一致性和性能存在一定冲突。
+
+强一致性要求节点通信，而且对每一个操作达成一致。这会导致常规有高的时延。
+
+如果你的一致性模型不是传统的模型，而是允许副本延迟或者分歧，那么你就可以在常规操作中减少时延，并在存在分区的情况下满足可用性。
+
+当一个操作中涉及到更少的信息和更少的节点，那么它的速度就会更快。
+但是要想做到这点，只能是减弱一致性的约束：让一些节点访问频率降低，这也意味着节点可以有旧数据。
+
+这也可能会导致异常。你不再保证能够得到最新的数据值。根据不同的一致性保证，你读到的数据可能是旧的，甚至可能没有更新。
+
+第四，或许并不直接，如果我们想在网络分区的情况下放弃可用性，那么我们应该探索除了强一致性模型之外能够达到我们目的的一致性模型。
+
+例如，用户数据放在多个数据中心，而数据中心的连接已经失效，大多数情况下，我们仍然希望允许用户使用网站/服务。
+这意味着调解两个有差异的数据集既是技术的挑战，也是商业的风险。
+通常技术挑战和商业风险是可控的，因此最好还是能保证高可用性。
+
+一致性和可用性并不是一个二选一的抉择，除非你限制自己要保证强一致性。
+但是，强一致性只是其中一个一致性模型。正如[Brewer本人所说](https://www.infoq.com/articles/cap-twelve-years-later-how-the-rules-have-changed/)，"三选二"本身是有误导的。
+
+如果你只想这些讨论中得到一个简单的idea，那就是：一致性并不是一个单一的、没有歧义的属性。记住：
+
+ACID一致性 != CAP一致性 != Oatmeal一致性 
+
+一致性模型是一个保证--任何关于数据存储给到使用它的程序的保证。
+
+在CAP理论里，C指的是强一致性，但是一致性并不是指"强一致性"。
+
+我们来看一些其他的一致性模型。
+
+### 强一致性 vs 其他一致性模型 
+
+一致性模型可以分为两类：强一致性和弱一致性。
+
+* 强一致又可以分为：Linearizable consistency 和 Sequential consistency 
+
+* 弱一致性又可分为： Client-centric consistency、Causal consistency 和 Eventual consistency 
+
+强一致性模型保证出现的顺序和更新的可见性等同于non-replicated系统。
+弱一致性则没有这样的保证。
+
+需要说明的是，下面的例子并不是全部的样例。在说一次，一致性模型只是定义程序员和系统之前的任意联系，所以它们可以是任何定义。
+
+#### 强一致模型
+
+强一致模型可以进一步分为两个相似，但又有些细微不同的模型：
+
+* Linearizable consistency: Under linearizable consistency, all operations appear to have executed atomically in an order that is consistent with the global real-time ordering of operations. 
+
+* Sequential consistency: Under sequential consistency, all operations appear to have executed atomically in some order that is consistent with the order seen at individual nodes and that is equal at all nodes. 
+
+最大的不同点在于，linearizable consistency要求操作的顺序等同于实际的实时的顺序。
+而sequential consistency允许操作重新调整顺序，只要每个节点上的操作顺序报纸不变就可以。
+能区分出这两者的方式是，它们是否能够观察到全局的系统的所有输入和时机；从客户端交互的视角，这两者没有太大区别。
+
+这样的区别看起来并不重要，但需要指出的是，sequential consistency does not compose（不知道什么意思。。）。
+
+强一致性模型允许程序员把一台单机服务器换成分布式集群，而不会引起任何问题。
+
+需要注意的是，对于弱一致性模型并没有普遍适用的定义，因为"非强一致性模型"可以是任何类型。
+
+#### client-centric一致性
+
+Client-centric一致性是客户端或者会话的一致性模型。例如，一个client-centric一致性可能保证客户端版本不会读到数据的旧的版本。
+它的实现通常是在客户端的函数库构建额外的缓存，这样如果客户端访问到有旧数据的副本服务器，则会返回缓存的数据，而不是从副本返回数据。
+
+Clients may still see older versions of the data, if the replica node they are on does not contain the latest version, but they will never see anomalies where an older version of a value resurfaces (e.g. because they connected to a different replica)
+
+#### 最终一致性
+
+最终一致性是指，如果你不再修改一个值，那么在一个规定的时间之后，所有的副本最终都会达成相同的值。
+也就是说，在那个时间内，副本之间的结果是不定义的。因为它很容易满足，因此如果没有额外的补充信息，这样的定义是没有意义的。
+
+说某样东西最终一致，就好比在说"人总是要死"一样。
+这是一个非常弱的限制，因此我们
+
+
+
+
+
+
 
  
 
