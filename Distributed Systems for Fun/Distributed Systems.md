@@ -867,9 +867,312 @@ Cassandra的Riak和Linkedin的Voldemort使用向量时钟（vector clock），�
 
 #### 向量时钟
 
+前面的时候，我们讨论了分布式系统上不同节点的处理速率的各种假设。
+假如我们没有一个准确的同步时钟，或者说，我们要求我们的系统不对时间的同步敏感，那么，我们如何定义事情的顺序？
+
+Lamport时钟和向量时钟可以替代物理时钟，它们使用计数器和通信来决定分布式系统的事件的顺序。
+这些时钟提供了一个不同节点之间可以相互比较的计数器。
+
+Lamport时钟很简单：每个处理进程根据下面规则来维护一个计数器： 
+
+* 任何时候，一个进程进行工作，就增加计数器；
+
+* 任何时钟，一个进程发送消息，就带上计数器；
+
+* 当收到一个消息，则把计数器设置为 max（本地计数器，收到的计数器+1） 
+
+用代码表示如下：
+
+```
+function LamportClock() {
+  this.value = 1;
+}
+
+LamportClock.prototype.get = function() {
+  return this.value;
+}
+
+LamportClock.prototype.increment = function() {
+  this.value++;
+}
+
+LamportClock.prototype.merge = function(other) {
+  this.value = Math.max(this.value, other.value) + 1;
+}
+```
+
+Lamport时钟允许计数器在不同系统之间比较，但需要注意：Lamport时钟定义的是偏序。
+如果timestamp(a) < timestamp(b): 
+
+* a可能在b之前发生
+
+* a可能无法跟b进行比较
+
+这就是时钟一致性条件（clock consistency condition）：如果一个事件在另一个事件之前到来，则该事件的逻辑时钟在其他事件之前。
+如果a和b来自于相同的随机历史事件（causal history），则要么两个时间戳的值由同一个进程产生；要么b是回应a带过来的消息，而a是发生在b之前的。
+
+直觉上，这是因为Lamport时钟只能携带一个时间线的历史记录；因此，比较两个从来没有进行过通信的系统的Lamport时间戳，可能会导致两个并行的事件看起来是有序的--而实际上它们没有。
+
+设想一个系统在初始化之后，便分成了两个相互独立的子系统，而且相互之间不再通信。
+
+每个相互独立的系统的所有事件，如果a在b之前发生，则ts(a) < ts(b)；但如果你比较两个相互独立的系统，你很难说出它们的相对顺序。
+当系统的每个部分都给事件分配了时间戳，这些时间戳之间并没有任何关系。
+因而，两个事件可能会看起来是有序的，而实际上它们并不相关。
+
+不过，这仍然是一个很有用的属性：对单机来说，任何消息在ts(a)时间发出，而在ts(b)时间收到，则ts(b)> ts(a)。
+
+向量时钟是Lamport时钟的扩展，它包含了N个逻辑时钟的数组 [ t1, t2, ... ] - 每个节点都有一个。
+此时不再是更新共同的计数器，而是每个节点只更新它自己的逻辑时钟。以下是更新规则：
+
+* 任何时候，一个进程进行工作，都会增加向量中它的逻辑时钟的值
+
+* 任何时候，一个进程发送消息，都要携带整个逻辑时钟的向量
+
+* 当收到消息的时候：a、更新向量中的每个节点 max(local,received); b、增加向量中代表该节点的逻辑时钟的值。
+
+同样的，附上代码：
+
+```
+
+function VectorClock(value) {
+  // expressed as a hash keyed by node id: e.g. { node1: 1, node2: 3 }
+  this.value = value || {};
+}
+
+VectorClock.prototype.get = function() {
+  return this.value;
+};
+
+VectorClock.prototype.increment = function(nodeId) {
+  if(typeof this.value[nodeId] == 'undefined') {
+    this.value[nodeId] = 1;
+  } else {
+    this.value[nodeId]++;
+  }
+};
+
+VectorClock.prototype.merge = function(other) {
+  var result = {}, last,
+      a = this.value,
+      b = other.value;
+  // This filters out duplicate keys in the hash
+  (Object.keys(a)
+    .concat(b))
+    .sort()
+    .filter(function(key) {
+      var isDuplicate = (key == last);
+      last = key;
+      return !isDuplicate;
+    }).forEach(function(key) {
+      result[key] = Math.max(a[key] || 0, b[key] || 0);
+    });
+  this.value = result;
+};
+
+```
+
+下图展示了时钟向量： 
+
+ ![image](https://github.com/linzhixia23/go-reading/blob/master/Distributed%20Systems%20for%20Fun/pic/3_vector_clock.png)
+
+上面的三个节点(A,B,C)都保存向量时钟的状态。当事件发生时，它们用向量时钟的当前值来标记时间戳。
+自己验证一下向量时钟，如{A:2,B:4,C:1}可以让我们更清楚事件如何影响消息。
+
+向量时钟的一个问题是，它们每个节点都需要一个数据项，这样对于大的系统，这可能会变得很大。
+很多技术已经用于减少向量时钟的大小：使用周期性的垃圾回收，或者限制大小来减少精度。
+
+我们已经看到了不使用物理时钟来追溯顺序和因果关系。
+现在，再来看持续时间(time duration)如何用于截断。
+
+#### 失败探测（截止时间）
+
+正如我前面提到的，等待的总时长可以用于判断系统是否网络分离（partition），或者是处于高时延。
+在这个情况下，我们不需要假设一个精确的全局时钟--只要有一个足够稳定的本地时钟就可以。
+
+对于一个在节点上运行的程序来说，它如何知道远端的节点失败了呢？
+在缺乏足够精确的信息的情况下，我们可以推断，在超过一段合理的时间之后，没有回应的远端节点就是失败了。
+
+那么，什么是"合理的时间"呢？这取决于本地和远端节点的延时。
+与其显式地用特定的算法计算特定的值，不如用一种合适的方式来抽象它。
+
+失败探测是一种抽象确切时间的方式。失败探测是通过心跳信息和记时器来实现的。
+进程交换心跳信息。如果没有在超时之前收到应答消息，那么该进程就要怀疑其他进程出现了问题。
+
+[Chandra等人](https://www.cs.utexas.edu/~lorenzo/corsi/cs380d/papers/p225-chandra.pdf)在解决一致性问题的情景下，讨论过错误探测的问题
+--这个是大多数副本问题（replication problem）的基础，而副本问题则是解决在在一个延时，而且有网络分离的环境下，如何达成一致。
+
+它们用两个属性来描述失败探测，完整性和准确性。
+
+* 强完整性。每一个崩溃的进程最终都会被每一个准确的进程监测到。
+
+* 弱完整性。每一个崩溃的进程最终会被一些准确的进程监测到。
+
+* 强准确性。没有任何疑似的进程。
+
+* 弱准确性。一些进程永远不会成为疑似进程。
+
+完整性比准确性更容易达成；所有主要的失败探测都实现了它--你所需要做的就是不会永远地等待某个疑似进程。
+Chandra指出，一个弱完整性的失败探测器可以转化成强完整性（只要把疑似进程广播出去），这就使得我们只要关注于准确性属性。
+
+避免误判疑似进程是一个很难的问题，除非你能假设信息的延时有一个hard maximum（注：理解应该是强制的最大的超时时间）。
+这个假设可以在一个同步模型中做出，于是在这个系统中，失败探测就可以做到强准确性。
+在没有对消息延时做强制界限的系统模型中，失败探测最好情况是达到最终准确。
+（Under system models that do not impose hard bounds on message delay, failure detection can at best be eventually accurate）。
+
+Chandra等人指出，即便是一个非常弱的失败探测器（最终弱准确性和弱完整性）都能用于解决一致性问题。
+下图展示了系统模型和问题可解性的关系：
+
+ ![image](https://github.com/linzhixia23/go-reading/blob/master/Distributed%20Systems%20for%20Fun/pic/3_chandra_failure_detectors.png)
+
+正如上面所看到的，在异步系统只能够，如果没有失败探测器（failure detector），则特定的问题无法解决。
+这是因为，如果没有失败探测，那就没办法知道一个远端节点是否已经崩溃，还是只是处于比较高延迟。
+这个区别对于任何single-copy一致性的系统来说很重要：失败的节点可以忽略，因为它们不会导致歧义，但是网络分离的节点（partitioned node）如果忽略了则会导致不安全。
+
+那么如何实现一个失败探测器呢？概念上来讲，实现一个简单的失败探测器并不难，只要超过超时时间，就可以认为是失败。
+但是这里最有意思的点在于，如果判断一个远端节点是失败（而不是延迟）。
+
+理想情况下，我们希望失败探测能够适应于网络的情况，避免以hardcode的方式设置超时时间。
+例如，Cassandra使用Accrual Failure Detector的方式，来给定一个0到1直接的可疑值，而不是单纯的二元判断的结果。
+这允许应用能够在精确判断和尽早发现错误之间做出抉择。
+
+#### 时间，顺序和性能
+
+在前面，我略微提过，顺序是有代价的。
+
+如果你写一个分布式系统，你大概会有一个以上的计算机。在现实世界中，大多数情况是偏序而不是总序。
+你可以把偏序转化成总序，但是这个需要通信、等待，以及增加一些限制，要求大多数计算机在特定时间点如何工作。
+
+时间和顺序通常会在一起讨论，单独时间这个属性本身并没有太大用处。
+算法并不太在意时间，它们更关注更多抽象的属性：
+
+* 事件的随机顺序（casual ordering）
+
+* 失败探测（例如，消息传输的近似上界）
+
+* 一致性快照（consistent snapshot）（例如，在某个节点检验系统状态的能力；在这里不进行讨论）
+
+强制一个全序是可能的，但是代价太大。它需要你以相同的速度处理（也就是最低的速度）。
+通常，最简单的保证所有事件都以特定的顺序传递的方式是，提名一个单点节点，让所有的操作都要经过它。
+
+是否时间/顺序/同步是真的需要的呢？这要看情况。在一些情况下，我们希望系统的每一个中间操作是一致的。
+例如，在大多数情况下，我们希望数据库回复的信息包含所有信息，而尽量避免系统返回不一致的结果。
+
+但是，在另一些case，我们可能不需要太多时间/顺序/同步。
+例如，你跑一个运行很长时间的计算，而且结果出来之前，并不在乎中间结果--此时，你并不需要太多的同步，因为你能保证答案是正确的。
+
+当只有一小部分case真正在乎最终结果的情况下，同步通常是所有操作之间一个比较生硬的工具。
+那么，什么时候顺序需要去保证准确性呢？CALM理论提供了一个回到--我将会在最后一章讨论这个问题。
+
+在其他情况，能接受的其他解法就是使用估计--也就是基于系统的节点的信息。
+特别的，在网络分离的情况下，一个节点需要在只能访问一部分机器的情况下，响应请求。
+在这样的情况下，终端用户其实不能真正区分出，相对容易获得的较新结果和保证准确但计算代价昂贵的结果之间的区别。
+以较小的代价，得到一个接近准确的结果，是可以接受的。
 
 
+#### 延伸阅读
 
+* [Time, Clocks and Ordering of Events in a Distributed System - Leslie Lamport, 1978](http://lamport.azurewebsites.net/pubs/time-clocks.pdf?ranmid=24542&raneaid=je6nubpobpq&ransiteid=je6nubpobpq-omavjvcatwjgr8iucc7i2a&epi=je6nubpobpq-omavjvcatwjgr8iucc7i2a&irgwc=1&ocid=aid2000142_aff_7593_1243925&tduid=(ir__ve1i3hs2q9kftw2mkk0sohzz0u2xlheyfa19bzhp00)(7593)(1243925)(je6nubpobpq-omavjvcatwjgr8iucc7i2a)()&irclickid=_ve1i3hs2q9kftw2mkk0sohzz0u2xlheyfa19bzhp00)
+ 
+* [Unreliable failure detectors and reliable distributed systems - Chandra and Toueg](https://dl.acm.org/doi/pdf/10.1145/226643.226647?download=true)
+ 
+* [Latency- and Bandwidth-Minimizing Optimal Failure Detectors - So & Sirer, 2007](http://www.cs.cornell.edu/people/egs/sqrt-s/doc/TR2006-2025.pdf)
+ 
+* [The failure detector abstraction, Freiling, Guerraoui & Kuznetsov, 2011](https://dl.acm.org/doi/pdf/10.1145/1883612.1883616?download=true)
+
+* [Consistent global states of distributed systems: Fundamental concepts and mechanisms, Ozalp Babaogly and Keith Marzullo, 1993](http://www.cs.utexas.edu/~lorenzo/corsi/cs380d/papers/chapt4.pdf)
+
+* [Distributed snapshots: Determining global states of distributed systems, K. Mani Chandy and Leslie Lamport, 1985](https://dl.acm.org/doi/pdf/10.1145/214451.214456?download=true)
+
+* [Detecting Causal Relationships in Distributed Computations: In Search of the Holy Grail - Schwarz & Mattern, 1994](http://www.vs.inf.ethz.ch/publ/papers/holygrail.pdf)
+
+* [Understanding the Limitations of Causally and Totally Ordered Communication - Cheriton & Skeen, 1993](https://dl.acm.org/doi/pdf/10.1145/168619.168623?download=true)
+
+
+### 4. 复制集（Replication)
+
+Replication是众多分布式系统问题中的一个。
+我关注它胜于其他问题，如：leader选举、失败探测、相互排斥（mutual exclusion）、一致性和全局快照等，是因为它通常是人们最感兴趣的话题。
+例如，两个并行的数据库的不同就在于它们的复制集特征。
+此外，replication跟很多子问题相关，例如leader选举、错误探测、一致性等。
+
+Replication是一个群组的通信问题。如何协议和通信（arrangement and communication）能够提供我们期望的性能和可用性？
+我们如何在网络分离和节点同步失败的情况下，保证容错性、持久性和非歧义性？
+
+同时，有很多方式实现replication。我这里介绍的只是high-level的模式。
+我的目标是探索设计的空间，而不是解释特定的算法。
+
+我们先来定义，replication是什么样的。我们假定有一些初始的数据库，客户端发送一些请求来改变数据库的状态。
+
+![image](https://github.com/linzhixia23/go-reading/blob/master/Distributed%20Systems%20for%20Fun/pic/4_replication_both.png)
+ 
+ 协议和通信的模式可以分为下面几个阶段：
+ 
+ * 1、请求-客户端发送请求到服务端
+ 
+ * 2、同步-replication的同步部分开始
+ 
+ * 3、回应-返回应答给客户端
+ 
+ * 4、异步-replication的异步部分开始
+
+这个模型大致基于[这篇文章](http://www-users.cselabs.umn.edu/classes/Spring-2018/csci8980/Papers/ProcessReplication/Understanding-Replication-icdcs2000.pdf)。
+注意，任务的每一个部分的信息交换取决于特定的算法：我有意尝试跳过它，而不必讨论特定的算法。
+
+给定了这些状态，我们能用什么样的通信模式呢？我们选用的模式的性能和可用性是什么样的呢？
+
+#### 同步复制集
+
+第一个模式是同步复制集(synchronous replication)。我们来看下它是什么样的：
+
+![image](https://github.com/linzhixia23/go-reading/blob/master/Distributed%20Systems%20for%20Fun/pic/4_replication_sync.png)
+
+这里，我们可以看到三个不同的阶段：首先，客户端发送请求。
+接着，复制集同步(synchronous portion of replication)开始，也就是，客户端阻塞，等待系统响应。
+
+在同步阶段，第一台服务器联系其他两台服务器，一直等待收到其他服务器的回应。
+最后，它发送应答给客户端通知结果（例如，成功或失败）。
+
+整个过程看起来很直接。我们如何在不涉及同步阶段的算法细节情况下，讨论这个特定的协议和通信模式呢？
+首先，这是一个write N-of-N方法：在一个响应返回之前，它会被系统的每一个服务器看见和确认。
+
+对于N-of-N方法，系统不能容忍任何服务器的缺失。当一个服务器缺失，系统则不能写给所有节点，则它不能再进行处理。
+它或许能提供数据的read-only访问，但修改则是不允许的。
+
+这种协议方式能提供非常强健的持久性（durability)：当客户端收到请求返回后，它能确定所有的服务器都收到、存储和确认了它的请求。
+如果一个确认的更新要丢失的话，除非所有N个副本都丢失，这是你能做出的最好的保证。
+
+#### 异步复制集
+
+我们来把它跟异步复制集进行对比。正如你猜想的那样，它跟同步复制集是相反的：
+
+![image](https://github.com/linzhixia23/go-reading/blob/master/Distributed%20Systems%20for%20Fun/pic/4_replication_async.png)
+
+这里，master(/leader/coordinator)节点会发送响应节点给客户端。
+它或许最好会把更新存储在本地，但它不会做太多的工作来进行同步，而客户端也不需要强制等待服务器之间多轮的通信。
+
+接着，复制集异步(asynchronous portion of the replication)开始。
+这时，master用某些通信模式联系其他服务器，其他服务器更新它们的数据副本。通信方式取决于使用的算法。
+
+我们如何在不涉及算法细节的情况下来讨论这个特定的协议方式呢？
+这是一个write 1-of-N方法：响应立刻返回，而更新会在稍后的时间传播。
+
+在性能的角度，这意味这系统可以更快：客户端不需要花更多时间等待系统内部来完成它们的工作。
+系统也更加能够忍受网络延时：因为内部延时的抖动不会在客户端造成更多的等待时间。
+
+这种协议方式只能提供弱的耐久性的保证。如果没有任何的错误，数据最终会复制到所有N台机器。
+当然，如果唯一有这个数据的服务器在这一切发生之后丢失了数据，那么这个数据就会永远丢失。
+
+对于1-of-N的方法，只要至少还有一个节点是正常的，系统就还能使用。（这个只是理论上的，实际上它的负载可能会很高）。
+一个像这样的纯lazy的方法并不提供持久性和一致性的保证；你允许往系统写数据，但是在错误发生时，它不保证你读回来的就是你写入的数据。
+
+最后，需要注意的是，passive replication并不保证系统里的所有节点都保持相同的状态。
+如果你接受数据在多个地方，而且不要求这些节点异步一致，你可能会面临数据不一致的风险：从不同地方地点读到的数据不一样（尤其是在节点失败并重启之后），以及不能强制全局限制（因为需要跟每一个节点通信）。
+
+我没有提到过读操作的通信模式（相对于写），因为读其实是用了写的模式：对于读来说，它实际上联系的节点更少。
+我们在后面讨论quorum的时候会再讲到。
+
+我们已经讨论了两种基本的协议方法，而没有讨论特定的算法。
+我们已经能够讨论通信模式（communication pattern），以及它们的性能、持久性保证和可用性特征。
 
 
 
