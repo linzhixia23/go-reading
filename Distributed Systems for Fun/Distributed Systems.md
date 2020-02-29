@@ -1091,7 +1091,7 @@ Chandra等人指出，即便是一个非常弱的失败探测器（最终弱准�
 ### 4. 复制集（Replication)
 
 Replication是众多分布式系统问题中的一个。
-我关注它胜于其他问题，如：leader选举、失败探测、相互排斥（mutual exclusion）、一致性和全局快照等，是因为它通常是人们最感兴趣的话题。
+我关注它胜于其他问题，如：leader选举、失败探测、共享资源互斥（mutual exclusion）、一致性和全局快照等，是因为它通常是人们最感兴趣的话题。
 例如，两个并行的数据库的不同就在于它们的复制集特征。
 此外，replication跟很多子问题相关，例如leader选举、错误探测、一致性等。
 
@@ -1173,6 +1173,707 @@ Replication是一个群组的通信问题。如何协议和通信（arrangement 
 
 我们已经讨论了两种基本的协议方法，而没有讨论特定的算法。
 我们已经能够讨论通信模式（communication pattern），以及它们的性能、持久性保证和可用性特征。
+
+#### 主要复制集方法概览
+
+看了两个基本的replication方法：同步和异步，我们再来看主要的replication算法。
+
+有很多对replication技术进行分类的方式。我想介绍的是这两种：
+
+* 防止歧义的replication方法（单copy系统）
+
+* 有歧义风险的replication方法（多master系统）
+
+第一组的方法使得系统具有"像单一系统一样工作"的属性。特别是，当部分错误出现时，系统保证其single copy特征激活。
+此外，系统保证副本总是达成一致的。这也就是一致性问题（consensus problme）。
+
+如果几个都对一些值达成一致，那么就认为它们是一致的。更正式地，
+
+* Agreement:每一个正确的进程必须认同相同的值；（Agreement: Every correct process must agree on the same value）
+
+* Integrity：每一个正确的进程决定至多一个值，而且如果它决定某些值，它必须由其他进程提议；（Integrity: Every correct process decides at most one value, and if it decides some value, then it must have been proposed by some process）
+
+* Termination: 所有进程最终达成决定；（Termination: All processes eventually reach a decision）
+
+* Validity: 如果所有正确的进程提议相同的值V，则所有正确的进程决定V；（Validity: If all correct processes propose the same value V, then all correct processes decide V）
+
+资源争夺、leader选举、消息多播和原子广播是一致性问题的更多例子。
+副本系统要达到单点复制的一致性，需要以某种方式解决一致性的问题。
+
+保持single-copy一致性的复制集算法包括：
+
+* 1n messages (asynchronous primary/backup)
+
+* 2n messages (synchronous primary/backup)
+
+* 4n messages (2-phase commit, Multi-Paxos)
+
+* 6n messages (3-phase commit, Paxos with repeated leader election)
+
+这些算法的错误容忍性（fault tolerance）是不一样的。
+我根据它们在执行算法时的消息交换数量把它们简单地做了分类，因为我认为能回到这个问题会很有意思："如果我们增加交换的数据量，要额外付出什么代价？"
+
+下图描述了不同选择的不同考量：
+
+![image](https://github.com/linzhixia23/go-reading/blob/master/Distributed%20Systems%20for%20Fun/pic/4_aspect_of_different_algorithm.png)
+
+上图的一致性、延迟性、吞吐量、数据损失和故障转移又可以追溯到两种不同的复制集方法：同步复制集和异步复制集。
+当你等待，你的性能会比较差，但是会有较强的保证。
+在我们讨论分区容忍性时，2PC和quorum系统的吞吐量区别会变得明显。
+
+在上图中，强制弱一致性的算法都被归为一类（"gossip"）。然而，我会再后面讨论更多细节。
+"transaction"行指的不仅仅是全global predicate evaluation，实际上，它在弱一致性系统中并不支持。
+
+需要指出的是，强调弱一致性的系统，对算法的泛化能力要求不高，这样在技术上就会有更多选择。
+因为系统不要求single-copy，则它可以表现得像是有多个节点的分布式系统，它可以更关注于让提供一种方式让使用者更能理解系统的特性。
+
+例如：
+
+* client-centric一致性模型在允许分歧的情况下，使用更加容易的一致性保证
+
+* CRDT探索特定状态的semilattice属性以及基于操作的数据类型
+
+* 合流分析根据计算的单调性信息来最大化地探索无序（disorder）
+
+* PSB（probabilistically bounded staleness）使用模拟和从现实收集数据的方式来刻画partial quorum system 的预期行为。
+
+我会较详细地讨论这些；首先，先来看下复制集算法如何保证single-copy一致性。
+
+### 主备复制集
+
+主备复制集大概是最常用的复制集方法，也是最基础的算法。所有的更新在主机器，其操作日志通过网络传输到备用机的副本。
+它有两个变体：
+
+* 异步主备复制集
+
+* 同步主备复制集
+
+同步版本需要两个消息（"更新"+"确认收到"），而异步的版本则只需要一个（"更新"）。
+
+P/B非常常见。例如，在MySQL中，复制集用的就是其异步的版本。MongoDB同样也用P/B（加上一些额外的流程进行故障转移。
+所有的操作都在一个master服务器上，它会序列化成本地日志，这些日志会被异步复制给备份的服务器。
+
+正如我们前面在异步复制集时讨论的，任何异步复制集算法只能提供弱耐久性保证（weak durability gurantee）。
+在MySQL复制集本身就意味着滞后复制：异步的备份（backup）总是落后主机器（primary）至少一个操作。
+如果主机器挂了，没有同步到备份机器的更新就会丢失。
+
+P/B复制集的同步变体保证写操作已经保存在节点，然后才返回给客户端-代价是，需要等待其他副本写完之后的回应。
+然而，需要注意的是，即便是这样的方式，也是提供了弱保证。
+考虑以下简单的失败场景：
+
+* 主机器接收写请求，然后发送到备份机器
+
+* 备份机器持久化，然后确认写操作
+
+* 主机器在发送确认操作给客户端之前就挂了
+
+客户端会认为确认失败了，而备份机器实际已经提交了；如果备份机器替代了主机器，那么就会不准确了。
+这时，可能需要手动清理来协调失败的主机器或者出现歧义的备份机器。
+
+当然，我在这里是做了简化。当所有的主备复制集算法遵循同样的消息模式，它们对失败的处理、副本离线化等都是不一样的。
+当时，在这种模式下，它们是没法避免这种主机器的碰巧失败导致的问题。
+
+这种基于log-shipping/主/备方式的关键就是，它们只能提供"最大努力"（best-effort）的保证（例如，它们会很容易丢失更新或者进行不正确的更新，如果节点在不凑巧的时间失败的话）。
+此外，P/B模式很容易导致split-brain，即：由于网络临时的问题导致备份机器加入时，会导致主备机器在相同的时间都是激活的。
+
+为了避免因为不凑巧的失败导致一致性保证被破坏；我们需要加入额外一轮的消息传递，这也就是两阶段提交协议（2PC）。
+
+#### 两阶段提交（2PC）
+
+两阶段提交（2PC）是用于学多经典关系数据库的协议。例如，MySQL集群用2PC提供了同步复制集（synchronous replication）。
+下图展示了消息的流动：
+
+[ Coordinator ] -> OK to commit?     [ Peers ]
+
+                <- Yes / No
+
+[ Coordinator ] -> Commit / Rollback [ Peers ]
+
+                <- ACK
+
+在第一阶段（投票），仲裁者（coordinator）发送更新到所有的参与者（participant）。
+每一个参与者处理更新，然后投票提交或者是终止（abort）。
+当投票为提交时，参与者把更新存储在一个临时区（也就是write-ahead log）。
+在第二个阶段完整之前，这个更新都认为是临时的。
+
+在第二阶段（决定），仲裁者决定结果并通知每一个参与者。如果所有的参与者都投票提交，则改更新会从临时区取出，并永久生效。
+
+有这样第二个阶段是很有用的，因为它允许系统在一个节点失败时回滚一个更新。
+相反地，在第一阶段，在一些节点失败而一些节点成功时，并没有步骤回滚操作，这回导致副本出现歧义。
+
+2PC很容易阻塞，因为单个节点失败会阻塞处理过程，直到节点恢复。
+由于有了第二个阶段通知系统状态，使得恢复成为可能。注意，2PC假设数据在每一个节点的稳定存储时不再丢失，以及节点不会再crash。
+其实，即便数据在稳定存储里，它也仍然会在crash时被破坏。
+
+在节点失败之后的恢复处理过程细节非常复杂，因为我不会讲这些细节。其主要任务是确保：写到磁盘的数据是持久的，以及做出正确的恢复决定。
+
+正如我们在CAP那章学到的，2PC是CA-它并不是分区容错的。
+2PC提供的失败模型并没有包括网络分区；它提供的恢复方式是失败节点一直等到网络分离恢复。
+如果一个仲裁者失败了，它并没有一个安全的方式来提拔另一个仲裁者；除非是人工干预。
+2PC同样对延迟敏感，因为它的写方式是N-of-N，也就是它要等到最慢的节点确认，写才算完成。
+
+2PC在性能和容错方面有较好的平衡，这也就是它为何在关系数据库中这么流行。
+然而，较新的系统通常使用分区容错的一致性算法，因为这些算法能够从临时的网络分离中自动恢复，同时也会较好地处理增加的节点之间的网络延时。
+
+下面来看分区容错的一致性算法。
+
+#### 分区容错一致性算法（Partition tolerant consensus algorithms）
+
+分区容错一致性算法是保持single-copy一直的算法。（原文是：Partition tolerant consensus algorithms are as far as we're going to go in terms of fault-tolerant algorithms that maintain single-copy consistency）
+
+当谈到分区容错一致性算法，最知名的就是Paxos算法。当然，它以难以实现和解释著称，于是，我主要关注Raft，它更容易教学和实现。
+我们先来看下网络分区（network partition）以及分区容错算法一般有哪些特点。
+
+##### 什么是网络分区？
+
+网络分区（network partition）是指网络连接其他一个或多个节点失败。而节点本身还是处于active状态，这样它们还能从客户端接收请求。
+正如我前面在讨论CAP时提过的，网络分区是一定会发生的，并不是所有系统都能优雅地处理它。
+
+网络分区这个问题很tricky，因为在一个网络分区中，不可能区分出远端节点失败了还是不可达了。
+如果网络分区出现，但没有节点失败，则此时系统就被分成了两个部分，而这两个部分都在同时运行。
+下图展示了为什么网络分区看起来像是节点失败。
+
+2个节点的系统，失败vs网络分区。
+
+![image](https://github.com/linzhixia23/go-reading/blob/master/Distributed%20Systems%20for%20Fun/pic/4_system_of_2_node.png)
+
+3个节点的系统，失败vs网络分区。
+
+![image](https://github.com/linzhixia23/go-reading/blob/master/Distributed%20Systems%20for%20Fun/pic/4_system_of_3_node.png)
+
+一个强制single-copy一致性的系统必须要有方法打破对称性：否则，它会分割成两个系统，彼此之前不同，这样就不再是single copy了。
+
+single-copy一致性系统，其网络分区容忍性要求，在一个网络分区中，只能有一个分区是active的，因为在网络分区中，歧义是没有办法避免的。
+
+##### 少数服从多数决定（majority decision）
+
+这是为什么分区容错一致性算法依赖于大多数投票。
+要求大多数投票-而不是全部投票（如2PC）-来对更新达成一致，会允许少数节点宕机、处理慢、或者由于网络问题导致不可达。
+只要 （N/2+1）-of-N 个节点是正常和可达的，这个系统就会持续工作。
+
+分区容错一致性算法使用奇数个节点（如3、5、7个等）。如果只有2个节点，在失败之后，它不能区分出大多数。
+例如，如果它有3个节点，则系统能够容忍1个节点失败；如果有5个节点，则能容忍2个节点失败。
+
+当网络分区出现时，分区的行为是不对称的。一个分区会包含大多数节点。
+少数节点的分区就会停止处理，避免在网络分区时出现不一致，但是大多数节点的分区仍然可以继续工作。
+这保证了系统的single copy状态是active的。
+
+少数服从多数还能容忍disagreement：如果出现了失败，则节点的投票会不同。
+但它只有一个majority decision，这样临时的disagreement至多会阻止协议继续进行（放弃了liveness），但它不会破坏single-copy一致性的原则。
+
+##### 角色
+
+构建系统可能有两种方式：所有节点都有相同的职责；一些节点有不同的角色。
+
+对于复制集的一致性算法，每个节点有各自的角色是一个相对更优的选择。
+有一个固定的leader或者master服务器是一种可以使系统更加高效的优化方式，因为所有的更新操作都要经过该服务器。
+非leader节点只需要把请求转发给leader。
+
+注意，有不同的角色并不会阻碍系统从leader（或其他角色）的失败中恢复。
+因为正常操作时角色固定并不意味着在失败之后它不会被重新分配其他角色（例如，通过leader选举阶段）。
+解决可以反复使用上一次leader选举的结果，直到出现节点失败或者是网络分区。
+
+Paxos和Raft都使用不同的解决角色。尤其是，它们有一个laeder（在paxos里叫"proposer"）节点在正常操作时进行协调。
+在正常操作时，其余的节点叫follower（在paxos里叫"acceptor"或者"voter"）。
+
+##### epoch
+
+每一个正常操作的周期在Paxos和Raft里叫做一个epoch（在raft里叫"term"）。
+在每个epoch里，只有一个节点指定为leader。
+
+![image](https://github.com/linzhixia23/go-reading/blob/master/Distributed%20Systems%20for%20Fun/pic/4_epoch.png)
+
+在一次成功的选举之后，会由同一个leader进行协调，直到该epoch结束。
+正如上图所示，一些选举可能会失败，这会导致该epoch立即结束。
+
+epoch像是一个逻辑时钟，当过期的节点开始通信时，其他节点能够识别--过期的节点会有更小的epoch数字，这样它们的命令就可以被忽略。
+
+##### 通过竞争的leader变更
+
+在正常操作时，分区容忍一致性算法很简单。正如我们前面看到的，如果我们不在乎容错，我们只要用2PC。
+大多数的复杂性来于确保需要做出一致性决定时，它不会丢失数据，以及在节点失败或者网络变化时，协议能够处理好leader变更。
+
+所有节点开始都是follower；一个节点最初会被选为leader。在正常操作时，leader需要保持一个心跳，以便follower检测leader是否失败，或者网络分区。
+
+当一个节点检测到leader不再回应时，它会进入中间状态（在Raft里叫"candidate"），此时它把epoch/term增加1，并开始leader选举，竞争成为leader。
+
+为了成为leader，该节点必须获得大多数投票。最简单的投票方式是，把票投给最先来的；这样，leader最终会被选举出来。
+在尝试等待时间里再加上一个随机时间值，会减少同时尝试竞选leader的节点数量。
+
+##### 一个epoch里提议的数值
+
+在每一个epoch里，leader提议一个值进行投票。每个epoch里，每个提议会有一个严格自增的唯一的数字标识。
+如果一个特定的值收到多个提议，则follow只会投票给第一个提议。
+
+##### 正常操作
+
+在正常的操作流程里，所有提议都要经过leader节点。当一个客户端提交一个提议，leader会联系所有节点进行仲裁。
+如果没有竞争的提议，则leader会提议该值。如果大多数follow接收该值，则可以认为这个值被接受了。
+
+因为有可能另一个节点也会成为leader，我们需要保证，一旦单个提议被接受了，它的值就再也不会改变。
+否则，一个已经被接受的提议，可能会被一个竞争的leader更改。Lamport是这样描述的：
+
+```
+P2: If a proposal with value v is chosen, then every higher-numbered proposal that is chosen has value v.
+```
+
+确保这个提议要求，follower和proposer都被算法限制为，每改变一个值都应该被大多数节点接受。
+注意，"the value can never change"指提议的单个处理的值。
+一个典型的复制集算法会同时运行多个，但在讨论单一运行会使得问题变得简单。
+我们希望避免决策历史被改变或覆盖。
+
+为了具备这样的属性，提议者必须首先询问follower它们（最大数字）接受的提议和具体值。
+如果提议者发现该提议已经存在，它必须结束这次提议的执行，而不是做出它自己的提议。
+Lamport是这样描述的：
+
+```
+P2b. If a proposal with value v is chosen, then every higher-numbered proposal issued by any proposer has value v.
+```
+
+更具体地，
+
+```
+P2c. For any v and n, if a proposal with value v and number n is issued [by a leader], then there is a set S consisting of a majority of acceptors [followers] such that either (a) no acceptor in S has accepted any proposal numbered less than n, or (b) v is the value of the highest-numbered proposal among all proposals numbered less than n accepted by the followers in S.
+```
+
+这个是Paxos算法的核心，同时算法也从它衍生而来。提议的值在协议的第二阶段之前不会被选择。
+提议者必须有时重传之前做的决定以确保安全性，直到它们知道它们可以强制自己的提议值。
+
+如果多个先前的提议存在，则选择最大数字值的协议。提议这只有在没有其他竞争的提议时，才能尝试强制它们自己的值。
+
+为了避免提议时出现冲突，提议者要求follower不要接受比当前数字还低的提议。
+
+把这些规则合在一起，就可以看到在Paxos中要做出决定，需要两轮的通信：
+
+[ Proposer ] -> Prepare(n)                                [ Followers ]
+
+             <- Promise(n; previous proposal number
+
+                and previous value if accepted a
+
+                proposal in the past)
+
+[ Proposer ] -> AcceptRequest(n, own value or the value   [ Followers ]
+
+                associated with the highest proposal number
+
+                reported by the followers)
+
+                <- Accepted(n, value)
+
+准备阶段允许提议者获得任何竞争的或者之前的提议。第二阶段是新的值或者之前接受的值进行提议。
+在一些case中--例如，两个提议者在同一个时间激活（dueling）；消息丢失；大多数节点都失败--则没有提议被大多数节点接受。
+但这个是可接受的，因为决定规则对什么值应该被提议里，会收敛于一个值。
+
+特别的，根据FLP impossibility结果，我们能做到最好的是：解决一致性问题的算法，当消息传递的bound没有保证时，必须放弃安全性或者活跃性（liveness）。
+Paxos放弃了活跃性：它可能会永久延迟做出决定，直到没有leader竞争，而且大多数节点接受一个提议。
+相比于破坏安全性保证，这个选择会更好。
+
+当然，实现这个算法比它描述的更难。它们有很多小的点，而代码实现难度却很大，即便是由专家来做。
+它们有这些问题：
+
+* 实践优化：a、通过领导合约（leadership lease）来避免重复的leader选举；b、在进入leader身份不改变的稳定状态时，避免重复提议消息；
+
+* 避免follower和proposer在稳定存储里不会丢失item，以及稳定存储里的结果不会丢失（如：磁盘损坏等）
+
+* 集群的成员能以安全的方式变更
+
+Google的文章[Paxos Made Live](https://www.cs.utexas.edu/users/lorenzo/corsi/cs380d/papers/paper2-1.pdf)对这些挑战提供更多细节。
+
+#### 分区容错的一致性算法：Paxos，Raft和ZAB 
+
+希望这里能给你一些分区容错一致性算法如何工作的大致感觉。
+我希望你能读延伸阅读里的一些文章，以了解不同算法的细节。
+
+Paxos。它是构建强一直分区容错副本系统的最重要的算法。它应用在大多数Google的系统里，包括[BigTable](https://storage.googleapis.com/pub-tools-public-publication-data/pdf/68a74a85e1662fe02ff3967497f31fda7f32225c.pdf) 
+/[Megastore](https://storage.googleapis.com/pub-tools-public-publication-data/pdf/36971.pdf)
+里用到的[Chubby锁管理](https://storage.googleapis.com/pub-tools-public-publication-data/pdf/c64be13661eaea41dcc4fdd569be4858963b0bd3.pdf)，谷歌文件系统，以及[Spanner](https://storage.googleapis.com/pub-tools-public-publication-data/pdf/65b514eda12d025585183a641b5a9e096a3c4be5.pdf)。
+
+Paxos是以希腊一个岛屿命名的，它最早是由Lamport在1998年的一篇名为"The Part-Time Parliament"里介绍的。
+它被认为很难实现，于是有很多公司根据自身的实践提供了很多更加实际的细节。
+你或许希望能希望读到Lamport对此的评论，可以看[这里](http://lamport.azurewebsites.net/pubs/pubs.html?irgwc=1&ocid=aid2000142_aff_7593_1243925&tduid=(ir__ve1i3hs2q9kftw2mkk0sohzz0u2xlmbw9r19bzhl00)(7593)(1243925)(je6nubpobpq-wto.0vuc6qpfrn5ur.j2da)()&irclickid=_ve1i3hs2q9kftw2mkk0sohzz0u2xlmbw9r19bzhl00#lamport-paxos?ranMID=24542&ranEAID=je6NUbpObpQ&ranSiteID=je6NUbpObpQ-wTO.0VUC6qpFRN5Ur.J2DA&epi=je6NUbpObpQ-wTO.0VUC6qpFRN5Ur.J2DA)
+和[这里](http://lamport.azurewebsites.net/pubs/pubs.html?irgwc=1&ocid=aid2000142_aff_7593_1243925&tduid=(ir__ve1i3hs2q9kftw2mkk0sohzz0u2xlmb3ob19bzhl00)(7593)(1243925)(je6nubpobpq-kyjvcxbn_0t9drwmezcmxq)()&irclickid=_ve1i3hs2q9kftw2mkk0sohzz0u2xlmb3ob19bzhl00#paxos-simple?ranMID=24542&ranEAID=je6NUbpObpQ&ranSiteID=je6NUbpObpQ-kyJvcXbn_0t9dRwMEzCMXQ&epi=je6NUbpObpQ-kyJvcXbn_0t9dRwMEzCMXQ)。
+
+Paxos在做决定的时候是单轮的（single round），但实际在实现的时候，希望高效运行多轮一致性算法。
+因而又衍生出了许多[该协议的扩展](http://lamport.azurewebsites.net/pubs/pubs.html?irgwc=1&ocid=aid2000142_aff_7593_1243925&tduid=(ir__ve1i3hs2q9kftw2mkk0sohzz0u2xlmb3ob19bzhl00)(7593)(1243925)(je6nubpobpq-kyjvcxbn_0t9drwmezcmxq)()&irclickid=_ve1i3hs2q9kftw2mkk0sohzz0u2xlmb3ob19bzhl00#paxos-simple?ranMID=24542&ranEAID=je6NUbpObpQ&ranSiteID=je6NUbpObpQ-kyJvcXbn_0t9dRwMEzCMXQ&epi=je6NUbpObpQ-kyJvcXbn_0t9dRwMEzCMXQ)。
+此外，还有一些实践挑战，例如如何优化集群的成员变更。
+
+ZAB. ZAB-Zookeeper原子广播协议用于Apache Zookeeper项目。
+Zookeeper提供了很多分布式系统的协调调度原语(coordination primitives)，它用于很多Hadoop-centric的分布式系统项目，如：HBase，Storm，Kafka等。
+Zookeeper是基于开源社区的Chubby版本。纯技术来讲，原子广播（atomic broadcase）跟纯一致性问题是不同的，但它仍然归于保证强一致性的分区容忍性算法。
+
+Raft. Raft是最近（2013）年的算法。它最初设计是为了比Paxos更容易用于教学，而且它提供了相同的保证。
+该算法最大的不同是，它描述了一个集群成员变更的机制。它的开源项目版本是[etcd](https://github.com/etcd-io/etcd)。
+
+#### 强一致性的复制集方法
+
+在这一节里，我们看了一些保证强一致性的复制集方法。
+首先对比了同步和异步，然后探讨了更多的算法，它们的失败的复杂度是不断增加的。
+以下是算法的一些关键特性。
+
+##### Primary/Backup
+
+* Single, static master
+
+* Replicated log, slaves are not involved in executing operations
+
+* No bounds on replication delay
+
+* Not partition tolerant
+
+* Manual/ad-hoc failover, not fault tolerant, "hot backup"
+
+##### 2PC
+
+* Unanimous vote: commit or abort
+
+* Static master 
+
+* 2PC cannot survive simultaneous failure of the coordinator and a node during a commit
+
+* Not partition tolerant, tail latency sensitive
+
+##### Paxos 
+
+* Majority vote
+
+* Dynamic master
+
+* Robust to n/2-1 simultaneous failures as part of protocol
+
+* Less sensitive to tail latency
+
+#### 延伸阅读
+
+##### 主备/2PC
+
+* [Replication techniques for availability - Robbert van Renesse & Rachid Guerraoui, 2010](https://www.researchgate.net/profile/Robbert_Van_Renesse/publication/221029788_Replication_Techniques_for_Availability/links/0c96052b26a4fc846a000000.pdf)
+
+* [Concurrency Control and Recovery in Database Systems](https://courses.cs.washington.edu/courses/cse551/09au/papers/CSE550BHG-Ch7.pdf)
+
+##### Paxos
+
+* [The Part-Time Parliament - Leslie Lamport](http://lamport.azurewebsites.net/pubs/lamport-paxos.pdf?ranmid=24542&raneaid=je6nubpobpq&ransiteid=je6nubpobpq-a0jo7p2g.7n1_ktmvl9yja&epi=je6nubpobpq-a0jo7p2g.7n1_ktmvl9yja&irgwc=1&ocid=aid2000142_aff_7593_1243925&tduid=(ir__ve1i3hs2q9kftw2mkk0sohzz0u2xlmbloi19bzhl00)(7593)(1243925)(je6nubpobpq-a0jo7p2g.7n1_ktmvl9yja)()&irclickid=_ve1i3hs2q9kftw2mkk0sohzz0u2xlmbloi19bzhl00)
+
+* [Paxos Made Simple - Leslie Lamport, 2001](http://lamport.azurewebsites.net/pubs/paxos-simple.pdf)
+
+* [Paxos Made Live - An Engineering Perspective - Chandra et al](http://www8.cs.umu.se/kurser/5DV153/HT14/literature/chandra2006paxos.pdf)
+
+* [Paxos Made Practical - Mazieres, 2007](http://read.seas.harvard.edu/~kohler/class/08w-dsi/mazieres07paxos.pdf)
+
+* [Revisiting the Paxos Algorithm - Lynch et al](https://groups.csail.mit.edu/tds/papers/DePrisco/WDAG97.pdf)
+
+* [How to build a highly available system with consensus - Butler Lampson](http://citeseerx.ist.psu.edu/viewdoc/download?doi=10.1.1.72.5429&rep=rep1&type=pdf)
+
+* [Reconfiguring a State Machine - Lamport et al - changing cluster membership](https://lamport.azurewebsites.net/pubs/reconfiguration-tutorial.pdf)
+
+* [Implementing Fault-Tolerant Services Using the State Machine Approach: a Tutorial - Fred Schneider](https://www.cs.cornell.edu/fbs/publications/SMSurvey.pdf)
+
+##### Raft和ZAB 
+
+* [In Search of an Understandable Consensus Algorithm, Diego Ongaro, John Ousterhout, 2013](https://raft.github.io/raft.pdf)
+
+* [Raft Lecture - User Study](https://www.youtube.com/watch?v=YbZ3zDzDnrw)
+
+* [A simple totally ordered broadcast protocol - Junqueira, Reed, 2008](https://www.datadoghq.com/pdf/zab.totally-ordered-broadcast-protocol.2008.pdf)
+
+* [ZooKeeper Atomic Broadcast - Reed, 2011](https://ieeexplore.ieee.org/stamp/stamp.jsp?tp=&arnumber=5958223)
+
+
+### 5. 复制集：弱一致性模型协议
+
+现在，我们已经看了一些强制single-copy一致性的协议，现在我们把目光转到现实的一个情景中--它并不要求single-copy一致性。
+
+总的来说，很难找出一个单一维度的定义允许副本有分歧的协议。
+大多数这样的协议是高可用的，而且其关键不仅仅是终端用户是否发现其保证、抽象或者是API是他们想要的，尽管事实是，在节点/网络出现错误时，副本是有分歧的。
+
+为什么弱一致性系统并没有很流行？ 
+
+正如我在介绍里说的，我认为大多数分布式编程在解决分布式带来的后果时，有两个隐含的假设：
+
+* 信息以光速传播
+
+* 相互独立的事件会相互独立地失败
+
+在单节点上计算是容易的，因为每件事都以一个可预测的全局顺序发生。在分布式系统上计算是复杂的，因为没有全局的顺序。
+
+很早之前，我们就通过引入全局的顺序（global total order）来解决这个问题。
+我已经讨论了很多方法，通过创造顺序来达到强一致性 ，尽管本质上没有出现全序（ there is no naturally occurring total order）。
+
+当然，这里的问题是，强制顺序的代价是很大的。
+This breaks down in particular with large scale internet systems, where a system needs to remain available。（break down在这里怎么理解）
+一个强一致性的系统并没有表现地像一个分布式系统：它像一个单一系统，而在出现分区时，它会影响可用性。
+
+此外，对于每一个操作，通常必须要接触大多数节点，而且通常不止一次，而是两次（正如在2PC里面讨论的）。
+这对于物理上分布式、而又需要对全局用户提供足够的性能的系统来说，是很痛苦的。
+
+因此，默认表现得像一个单一系统，或许并不是我们所期望的。
+
+或许，我们需要的系统是，我们不需要用到太多的协调调度，而且能够返回一个"可以用"（usable）的值。
+相比于只有一个唯一的真值，我们可以允许不同副本之间有差异--不仅可以保持效率，而且容忍分区--同时尝试找到一个方式在某种程度上解决分歧。
+
+最终一致性表达了这个思路：节点可以在某些时间彼此不同，但最终它们会达成统一值。
+
+对于提供最终一致性的系统，它们有两种类型的设计：
+
+概率保证的最终一致性（Eventual consistency with probabilistic guarantees）。
+这类型能够在随后检测出写冲突，但是并不保证结果等于以某种正确的顺序执行得到的结果。
+换句话说，更新冲突有时会导致用旧的值覆盖了新的值，而且一些错误可能会出现在正常的操作中。
+
+近些年，提供single-copy一致性的最有影响力的系统是亚马逊的Dynamo，我们在稍后把它做为一个提供了概率保证的最终一致性的系统的例子。
+
+强保证的最终一致性（Eventual consistency with strong guarantees）。
+这类型保证最终结果收敛到一个值，它等于以某种正确顺序执行得到的结果。
+换句话说，这类系统并不产生任何异常结果；不需要任何协调，你就可以构建相同服务的副本，这些副本可以以任何方式通信，以任何顺序收到更新消息，而它们最终会对最后结果达成一致，只要它们看到的是相同的信息。
+
+CRDT（convergent replicated data types）是一种数据类型，它们保证收敛到相同的值，不管是网络延迟、分区还是消息乱序。
+它们证明是收敛的，但是数据类型必须按CRDT限制的来实现。
+
+CALM也是另一个选择：它等同于逻辑单调一致（原话是，it equates logical monotonicity with convergence）
+如果我们能确认某件事是逻辑单调的，则它可以安全地运行而不需要协调。
+合流分析（confluence analysis）--用Bloom编程语言实现的--可以用于指导编程者决定，何时何地用强一致系统的协调技术（coordination technique），何时又能安全地不使用协调技术。
+
+#### 协调不同的操作顺序
+
+一个不强制single-copy一致性的系统是什么样的？我们通过一些具体的实例来看。
+
+或许该系统最明显的一个特征是，它允许副本彼此不同。这意味着，它没有强制定一个通信的模式：副本可以彼此分离，能够继续工作，并且能够接受写请求。
+
+假设一个系统有3个副本，彼此之间相互分离。例如，每一个副本可以是三个不同的数据中心，由于某种原因没法相互通信。
+每个副本在分区中都保持可用，接受来自客户端的读写请求：
+
+[Clients]   - > [A]
+
+--- Partition ---
+
+[Clients]   - > [B]
+
+--- Partition ---
+
+[Clients]   - > [C]
+
+过一段时间之后，物理分区修复了，副本服务器开始交互信息。他们由于已经从不同服务器接收不同的更新请求，因而他们彼此之间存在差异，因而需要某种协调。
+我们期望的是，所有副本都收敛到相同的结果。
+
+[A] \
+    --> [merge]
+[B] /     |
+          |
+[C] ----[merge]---> result
+
+另一种理解弱一致性的方式是，假设一些服务器以某种顺序给两个副本发送消息。
+由于没有一致性协议，强制一个唯一的总序（total order），因而消息在两个副本的顺序可以不同：
+
+[Clients]  --> [A]  1, 2, 3
+
+[Clients]  --> [B]  2, 3, 1
+
+这也就是本质上为什么我们需要一致性协议。例如，我们希望链接一个字符串，而三个操作的消息如下：
+
+1: { operation: concat('Hello ') }
+
+2: { operation: concat('World') }
+
+3: { operation: concat('!') }
+
+如果没有一致性卸掉，A会输出"Hello World!"，而B会输出"World!Hello"。
+
+A: concat(concat(concat('', 'Hello '), 'World'), '!') = 'Hello World!'
+
+B: concat(concat(concat('', 'World'), '!'), 'Hello ') = 'World!Hello '
+
+这当然是不对的。我们希望的是两个不同的副本收敛到相同的结果。
+
+记住这两个例子。我们先看Amazon的Dynamo系统，来建立一个基础的概念，然后介绍一些有意思的构建弱一致性系统的方法，例如CRDT和CALM理论。
+
+#### Amazon的Dynamo 
+
+Amazon的Dynam系统可能是最知名的提供弱一致性、高可用性的系统了。
+它是现实很多其他系统的基础，包括Linkin的Voldemort，Facebook的Cassandra和Basho的Riak。
+
+Dynamo是最终一致性，高可用的key-value存储。
+key-value存储就像一个大的哈希表，客户端可以通过设置（key，value）来设置一个值，并可以通过key来检索。
+Dynamo集群包括N个节点；每个节点有一些key的节点来存储。
+
+Dynamo对可用性的要求高于一致性；它并不保证single-copy一致性。
+相反的，在写的时候，副本之间可以不同；在读的时候，会有一个读协调阶段（read reconciliation phase）可以在返回客户端之前尝试解决不同副本之间的不一致。
+
+对Amazon的许多特性来说，避免断电（outage）比保证数据绝对的一直更重要，因为断电会导致商业和信誉上损失。
+此外，如果数据不是非常重要，弱一致性系统相比于传统的RDBMS，能够以更小的代价来提供更好的性能和更高的可用性。 
+
+由于Dynamo是一个完整的系统设计，出了核心的副本任务，它还有很多不同的部分。
+下图阐释了一些任务；最重要的是，一个写操作如何路由到一个节点，并写到不同的副本。 
+
+![image](https://github.com/linzhixia23/go-reading/blob/master/Distributed%20Systems%20for%20Fun/pic/5_dynamo_write_process.png)
+
+在看了写操作最初如何被接受的，我们再来看冲突检测，以及异步副本同步任务（asynchronous replica synchronization task）。
+副本同步任务保证即便节点失败了，它也能很快跟上来。
+
+#### 一致性哈希
+
+不管是读还是写，我们需要做的第一件事是确定数据在系统的什么位置。
+这需要某种key-to-node的映射。
+
+在Dynamo中，key通过[一致性哈希](https://github.com/mixu/vnodehash)的方式映射到节点（在这里我们不讨论细节）。
+它的主要思路是，在客户端做简单的计算，然后把一个key映射到一些节点中的目标节点。
+这意味着，客户端本地保存key，而不需要查询系统来获得每一个key的位置；这样会节省系统资源，因为哈希通常会比RPC更快。
+
+#### 部分仲裁 
+
+当我们知道一个key存在什么地方，我们需要做的是持久化（persist）它。
+这是一个同步的任务；我们需要马上把这个值写到多个节点的原因是为了提供持久性（例如，在节点立即失败时进行保护）。
+
+像Paxos和Raft一样，Dynamo使用副本仲裁（quorum for replication）。
+然而，Dynamo的仲裁是部分仲裁（partial quorum）而不是严格仲裁（strict quorum）。
+
+正式地讲，一个严格的仲裁系统是任何两个仲裁集相互重叠。
+（Informally, a strict quorum system is a quorum system with the property that any two quorums in the quorum system overlap）。
+它在更新之前需要大多数的投票，这样保证了只有一个历史记录提交，因为大多数仲裁（majority quorum）的机制使得必须至少有一个节点重叠。
+这也是Paxos所依赖的属性。
+
+而部分仲裁并没有这个属性；这意味着"少数服从多数"并不是必须的，而不同的仲裁集可能对同样的数据有不同的版本。
+用户可以选择节点数量来写或者读：
+
+* 用户可以选择W-of-N节点要求写成功；
+
+* 用户可以在读的时候，指定R-of-N；
+
+W和R分别指定了写和读的时候要多少个节点。写的时候要求更多节点，可能会慢一点，但是增加了数据不会丢失的概率；
+从更多的节点读数据，增加了读到最新数据的概率。
+
+通常推荐的是R+W>N，因为这意味着读写仲裁至少有一个节点重叠--使得返回错误数据的几率降低。
+一个典型的配置是N=3；这意味着用户需要在以下值做出决定：
+
+R = 1, W = 3;   R = 2, W = 2 or R = 3, W = 1
+
+更通用的是，假设 R+W >N： 
+
+* R=1,W=N : 读很快，但是写很慢；
+
+* R=N，W=1 ： 写得快，但是读得慢；
+
+* R=N/2， W/2+1 ： 两者平衡。 
+
+N很少大于3，因为保存很多份数据的拷贝，成本很高。
+
+正如我之前提到的，Dynamo那篇论文对很多类似的系统设计很有启发。
+他们基于数据副本的方法，使用了部分仲裁，但对N，W和R有不同的默认值：
+
+* Basho's Riak (N = 3, R = 2, W = 2 default) 
+
+* Linkedin's Voldemort (N = 2 or 3, R = 1, W = 1 default) 
+
+* Apache's Cassandra (N = 3, R = 1, W = 1 default)
+
+这里还有一个细节：当发送一个读或写请求，是所有N个节点要回应（Riak），还是只要有最少的节点回应（如 R或；Voldemort）。
+"send-to-all"的方法更快，而且对延时不敏感（因为，它只要等待N里面最快的W或R个节点）；
+而"send-to-minimum"方法对延时更加敏感（因为，单点的通信延迟会导致操作延迟），但它也是很高效的（更少的信息和链接）。
+
+当R+W>N时，会发生什么？更具体地说，通常把这个结果称为"强一致性"。
+
+#### 是否R+W>N等同于"强一致性"？ 
+
+不。
+
+一个系统的 R + W > N 能探测读/写冲突，因为任何读仲裁和写仲裁都有一个共同的成员。
+例如，至少一个节点在两个仲裁中： 
+
+   1     2   N/2+1     N/2+2    N
+
+  [...] [R]  [R + W]   [W]    [...]
+  
+这保证了写的操作，会被后续一个读操作看到。 
+当然，这里的前提是节点数N不再变化。而这个是Dynamo不具备的，因为在Dynamo中在节点失败时，集群的成员是会改变的。
+
+Dynamo设计为总是可以写的。它有一个机制处理节点错误：在之前的服务器宕机时，增加一个不同的、不相关的服务器到节点集中，这个服务器负责一部分特定的key。
+这意味着，仲裁协议不再保证总是有overlap。
+即便是 R=W=N也不能满足，因为当仲裁的大小等于N，在失败时，仲裁的节点会改变。
+具体地说，在一个分区中，如果有足够数量的节点不可达，Dynamo会增加新的节点，它虽然不相关，但是可以访问。
+
+此外，Dynamo并不像一个强一致性的模型一样去处理分区：也就是，写能在两边的分区进行，这意味着，至少在某段时间里，系统并没有显示得像一个single-copy。
+因而，说R+W>N是"强一致性"是有误导的；它只是在概率上--而这跟强一致性的定义是不一样的。 
+
+#### 冲突检测和读修复 
+
+一个允许副本差异的系统必须要有一种方式来最终协调两个不同的值。
+正如前面介绍的，采用的方式是在读的时候检测冲突，然后采用一些冲突解决方法。那么，该如何做？ 
+
+大致来说，是通过元数据来追踪数据的因果历史（casual history）。
+客户端从系统读取数据时，必须保存元数据的信息，而写入数据库时，必须返回元数据的值。 
+
+我们已经有一个方法来做这个：向量始终可以用于表示一个值的历史。
+特别的，这就是Dynamo最初用于检测冲突的设计。
+
+然而，使用向量时钟并不是唯一的选择。如果你看很多实际的系统设计，你可以大致推断出它们如何使用元数据。
+
+_没有元数据_。当一个系统不跟着元数据，而只返回值，它实际上对并发写并没有做太多的事情。
+通常的规则是，采用最后的写结果，换句话说，如果两个writer同时写，只会保留最慢的writer的结果。
+
+_时间戳_。名义上是采用有最大时间戳的值。然而，如果时间没有很好地同步，一些奇怪的情况就会出现，如在系统出错时，会写旧的数据，或者是最快的时钟会覆写最新的值。
+Facebook的Cassandra是Dynamo的变体，它使用的就是时间戳而不是向量时钟。
+
+_版本号_。版本号或许能避免使用时间戳遇到的一些问题。注意的是，在多个历史值发生时，最基本的准确追踪的机制是向量时钟，而不是版本号。 
+
+_向量时钟_。使用向量时钟，并发数据和旧的数据会被检测出来。进行读修复（read repair）因此称为可能，尽管有时我们会需要问客户端来决定一个值。
+这是因为如果变化是并发的，我们其实对数据一无所知，因此最好是询问，而不是随机丢弃。
+
+当读一个值的时候，客户端联系N个节点中的R个，询问它们一个key的最新值。
+它会获得所有的应答，并丢弃严格意义上的旧值（使用向量时钟来检测）。
+如果只有唯一的向量时钟+值，它会返回。如果有多个向量时钟+值，则所有的值都会返回。
+
+显然，读修复会返回多个值。这意味着客户端/应用开发者必须处理这样的情况，根据一些特定的规则选一个值。
+
+特别地，实际的向量时钟系统的一个关键部分是，时钟不能永远地增长，因此它需要一个过程（procedure）来安全地进行垃圾回收，以平衡容错和存储要求。
+
+#### 副本同步：gossip and merkle tree 
+
+既然Dynamo系统设计是节点容错和网络分区，它需要处理节点在分区之后，重新加入集群的问题，以及失败节点被替代或部分恢复。
+
+副本同步用于在失败之后，使得节点同步到最新，以及周期性地同步副本。
+
+Gossip是一个概率的技术用于同步副本。它的通信模式（例如节点之间相互联系）不会提前决定。
+相反的，节点以一定概率p尝试相互同步数据。每t秒，每一个节点会选一个节点来通信。
+这提供了异步任务之外的一种额外的机制来使得副本更新。 
+
+Gossip是一种可扩展的，但它只能提供概率的保证。
+
+为了使副本同步时信息交换有效率，Dynamo使用了一种叫做Merkle tree的技术。
+这里我不会展开讲。它的关键思路是，数据存储可以哈希成不同的粒度：用哈希代表整个内容，一般的key值，四分之一key值等。
+
+通过保存这个粒度的哈希，节点可以更高效地对比他们的数据存储。
+当一个节点的唯一key有不同值时，它们只要交换一些必要的信息，就可以使得副本更新。
+
+#### Dynamo实践：probabilistically bounded staleness（PBS）
+
+Dynamo系统设计包括以下：
+
+* 一致性哈希决定key的位置
+
+* 读写的部分仲裁 
+
+* 通过向量时钟来解决冲突检测和读修复 
+
+* gossip用于副本同步 
+
+我们如何特征化这样的系统的行为？Bailis等人提出了一种PBS的方法，用模拟和从现实系统收集的数据来特征化这样系统所预期的行为。
+
+PBS使用关于anti-entropy的信息来估计不一致性度（degree of inconsistency ），用网络延时和本地处理延时来估计读的一致性等级。
+它已经在Cassandra中实现，它的时间信息通过其他消息携带，并基于蒙特卡洛模拟的方式来进行估计。
+
+在这篇文章中，在普通操作中，最终一致性数据存储通常更快，而且会在10-100毫秒达到读一直的状态。
+下面的表展示了在不同R和W的情况下，以99.9%概率达到读一致性的数据。
+
+![image](https://github.com/linzhixia23/go-reading/blob/master/Distributed%20Systems%20for%20Fun/pic/5_PBS_table.png)
+
+更多细节可以在[PBS](http://pbs.cs.berkeley.edu/)的官网查询。 
+
+
+
+
+
+
+
+
 
 
 
