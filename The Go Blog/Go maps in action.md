@@ -114,7 +114,7 @@ commits := map[string]int{
 m = map[string]int{}
 ```
 
-### 利用零值
+#### 利用零值
 
 当key不存在时返回value的零值这个特征很有用。
 
@@ -180,7 +180,7 @@ fmt.Println(len(likes["bacon"]), "people like bacon.")
 因为range和len都把nil的slice看作长度为0的slice，因而即便没有人喜欢cheese或bacon，代码也不会有错。
 
 
-### key的类型 
+#### key的类型 
 
 正如前面提到的，map的key可以是任何可以比较的类型。
 (go语言规范)[https://golang.org/ref/spec#Comparison_operators]对此做了精确的定义，简而言之，可比较的类型包括：布尔型、数值型、字符串、指针、channel等。
@@ -266,7 +266,7 @@ counter.m["some_key"]++
 counter.Unlock()
 ```
 
-### 迭代顺序
+#### 迭代顺序
 
 当使用range来迭代map的时候，它的顺序并不确定，也不保证每次的顺序都一样。
 如果你要保证稳定的迭代顺序，你必须维护一个独立的数据结构。
